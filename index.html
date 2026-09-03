@@ -1,0 +1,1227 @@
+<title>Engelbrecht Invoicing</title>
+<meta name="description" content="Create invoices and quotes as Charl Engelbrecht, with a saved client list and running document numbers.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Sans+3:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6F7F4;
+    --paper-raised:#FFFFFF;
+    --ink:#1B211D;
+    --ink-soft:#5C6760;
+    --ink-faint:#8B948D;
+    --line:#DEE3DC;
+    --line-strong:#C3CBC3;
+    --accent:#1F5C4A;
+    --accent-hover:#17473A;
+    --accent-soft:#E3EEE8;
+    --accent-ink:#0E332A;
+    --warn:#A85326;
+    --warn-soft:#F5E7DD;
+    --good:#2E7D4F;
+    --good-soft:#E1F0E6;
+    --pending:#8E6B18;
+    --pending-soft:#F6EEDC;
+    --shadow: 0 1px 2px rgba(27,33,29,0.06), 0 6px 16px -8px rgba(27,33,29,0.18);
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#131C17;
+      --paper-raised:#1A2620;
+      --ink:#EAF0EA;
+      --ink-soft:#A9B7AE;
+      --ink-faint:#71827A;
+      --line:#293A31;
+      --line-strong:#3A4E43;
+      --accent:#54B58C;
+      --accent-hover:#6BC79E;
+      --accent-soft:#1E3A2E;
+      --accent-ink:#BFE9D3;
+      --warn:#E08A55;
+      --warn-soft:#3B2A1E;
+      --good:#6FC492;
+      --good-soft:#1E3A2A;
+      --pending:#E0B15A;
+      --pending-soft:#3A2F17;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 20px -8px rgba(0,0,0,0.5);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#131C17;
+    --paper-raised:#1A2620;
+    --ink:#EAF0EA;
+    --ink-soft:#A9B7AE;
+    --ink-faint:#71827A;
+    --line:#293A31;
+    --line-strong:#3A4E43;
+    --accent:#54B58C;
+    --accent-hover:#6BC79E;
+    --accent-soft:#1E3A2E;
+    --accent-ink:#BFE9D3;
+    --warn:#E08A55;
+    --warn-soft:#3B2A1E;
+    --good:#6FC492;
+    --good-soft:#1E3A2A;
+    --pending:#E0B15A;
+    --pending-soft:#3A2F17;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 20px -8px rgba(0,0,0,0.5);
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Source Sans 3', ui-sans-serif, system-ui, sans-serif;
+    font-size:15px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3,h4{
+    font-family:'Archivo', ui-sans-serif, system-ui, sans-serif;
+    font-weight:700;
+    text-wrap:balance;
+    margin:0;
+    color:var(--ink);
+    letter-spacing:-0.01em;
+  }
+  .mono{ font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace; font-variant-numeric:tabular-nums; }
+  a{color:var(--accent);}
+  button{ font-family:inherit; }
+  input, select, textarea{
+    font-family:inherit;
+    font-size:14px;
+    color:var(--ink);
+    background:var(--paper-raised);
+    border:1px solid var(--line-strong);
+    border-radius:6px;
+    padding:8px 10px;
+    width:100%;
+  }
+  input:focus, select:focus, textarea:focus, button:focus-visible{
+    outline:2px solid var(--accent);
+    outline-offset:1px;
+  }
+  label{ display:block; font-size:12.5px; font-weight:600; color:var(--ink-soft); margin-bottom:4px; letter-spacing:0.01em; }
+  textarea{ resize:vertical; min-height:70px; }
+
+  .btn{
+    display:inline-flex; align-items:center; gap:6px;
+    font-size:14px; font-weight:600;
+    padding:9px 15px; border-radius:7px;
+    border:1px solid var(--line-strong);
+    background:var(--paper-raised); color:var(--ink);
+    cursor:pointer;
+    transition:background .12s ease, border-color .12s ease, transform .04s ease;
+    white-space:nowrap;
+  }
+  .btn:hover{ border-color:var(--ink-faint); }
+  .btn:active{ transform:translateY(1px); }
+  .btn-primary{ background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn-primary:hover{ background:var(--accent-hover); border-color:var(--accent-hover); }
+  .btn-ghost{ background:transparent; border-color:transparent; }
+  .btn-ghost:hover{ background:var(--accent-soft); border-color:transparent; }
+  .btn-danger{ color:var(--warn); }
+  .btn-danger:hover{ background:var(--warn-soft); border-color:var(--warn-soft); }
+  .btn-sm{ padding:6px 11px; font-size:13px; border-radius:6px; }
+  .btn[disabled]{ opacity:.45; cursor:not-allowed; }
+
+  .badge{
+    display:inline-flex; align-items:center; gap:5px;
+    font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
+    padding:3px 9px; border-radius:100px;
+    background:var(--line); color:var(--ink-soft);
+  }
+  .badge-draft{ background:var(--line); color:var(--ink-soft); }
+  .badge-sent{ background:var(--pending-soft); color:var(--pending); }
+  .badge-paid, .badge-accepted{ background:var(--good-soft); color:var(--good); }
+  .badge-overdue, .badge-declined{ background:var(--warn-soft); color:var(--warn); }
+  .badge-invoice{ background:var(--accent-soft); color:var(--accent-ink); }
+  .badge-quote{ background:var(--line); color:var(--ink-soft); }
+
+  #topbar{
+    position:sticky; top:0; z-index:20;
+    background:var(--paper-raised);
+    border-bottom:1px solid var(--line);
+  }
+  .topbar-inner{
+    max-width:1080px; margin:0 auto;
+    display:flex; align-items:center; gap:22px;
+    padding:14px 20px;
+  }
+  .brand{ display:flex; align-items:baseline; gap:8px; flex:0 0 auto; }
+  .brand-mark{ font-family:'Archivo'; font-weight:700; font-size:17px; letter-spacing:-0.01em; }
+  .brand-sub{ font-size:11.5px; color:var(--ink-faint); font-family:'IBM Plex Mono'; }
+  nav.tabs{ display:flex; gap:2px; flex-wrap:wrap; }
+  .tab{
+    font-size:13.5px; font-weight:600; color:var(--ink-soft);
+    padding:8px 12px; border-radius:7px; cursor:pointer; border:1px solid transparent;
+    background:transparent;
+  }
+  .tab:hover{ background:var(--accent-soft); color:var(--ink); }
+  .tab.active{ background:var(--accent-soft); color:var(--accent-ink); }
+  .topbar-spacer{ flex:1; }
+
+  main{ max-width:1080px; margin:0 auto; padding:28px 20px 80px; }
+  .view-head{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
+  .view-head h1{ font-size:24px; }
+  .view-sub{ color:var(--ink-soft); font-size:13.5px; margin-top:4px; }
+  .actions-row{ display:flex; gap:8px; flex-wrap:wrap; }
+
+  .card{
+    background:var(--paper-raised);
+    border:1px solid var(--line);
+    border-radius:12px;
+    box-shadow:var(--shadow);
+  }
+  .card-pad{ padding:20px; }
+  .grid{ display:grid; gap:16px; }
+  .grid-2{ grid-template-columns:1fr 1fr; }
+  .grid-3{ grid-template-columns:repeat(3,1fr); }
+  .grid-4{ grid-template-columns:repeat(4,1fr); }
+  @media (max-width:720px){ .grid-2,.grid-3,.grid-4{ grid-template-columns:1fr; } }
+
+  .stat{ padding:16px 18px; }
+  .stat-label{ font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--ink-faint); }
+  .stat-value{ font-family:'IBM Plex Mono'; font-size:24px; font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .stat-value.accent{ color:var(--accent); }
+  .stat-value.warn{ color:var(--warn); }
+
+  table{ width:100%; border-collapse:collapse; font-size:14px; }
+  th{ text-align:left; font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--ink-faint); padding:0 12px 10px; border-bottom:1px solid var(--line); }
+  td{ padding:12px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:hover{ background:var(--accent-soft); }
+  .table-wrap{ overflow-x:auto; }
+  .num-cell{ font-family:'IBM Plex Mono'; font-variant-numeric:tabular-nums; text-align:right; }
+  .row-link{ cursor:pointer; }
+
+  .empty{ text-align:center; padding:56px 24px; color:var(--ink-soft); }
+  .empty h3{ font-size:16px; margin-bottom:6px; color:var(--ink); }
+  .empty p{ font-size:13.5px; max-width:38ch; margin:0 auto 18px; }
+  .empty-icon{ font-size:30px; margin-bottom:10px; opacity:.7; }
+
+  .field{ margin-bottom:14px; }
+  .field-row{ display:flex; gap:12px; }
+  .field-row > .field{ flex:1; }
+  .hint{ font-size:12px; color:var(--ink-faint); margin-top:4px; }
+  .switch-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; background:var(--accent-soft); border-radius:8px; }
+  .switch{ position:relative; width:38px; height:22px; flex:0 0 auto; }
+  .switch input{ position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; }
+  .switch .track{ position:absolute; inset:0; background:var(--line-strong); border-radius:100px; transition:background .15s; }
+  .switch input:checked + .track{ background:var(--accent); }
+  .switch .thumb{ position:absolute; top:2px; left:2px; width:18px; height:18px; background:#fff; border-radius:50%; transition:left .15s; box-shadow:0 1px 2px rgba(0,0,0,.3); }
+  .switch input:checked ~ .thumb{ left:18px; }
+
+  .items-table th, .items-table td{ padding:8px 8px; }
+  .items-table input{ padding:7px 8px; }
+  .items-table .desc-col{ width:50%; }
+  .items-table .num-col{ width:120px; }
+  .items-table .del-col{ width:36px; }
+
+  .totals{ margin-left:auto; width:280px; display:flex; flex-direction:column; gap:8px; }
+  .totals-row{ display:flex; justify-content:space-between; font-size:14px; }
+  .totals-row.total{ font-weight:700; font-size:17px; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
+  .totals-row.total .mono{ color:var(--accent); }
+
+  .modal-backdrop{ position:fixed; inset:0; background:rgba(20,26,22,0.45); display:flex; align-items:center; justify-content:center; z-index:50; padding:20px; }
+  .modal{ background:var(--paper-raised); border-radius:12px; box-shadow:var(--shadow); max-width:460px; width:100%; padding:22px; max-height:88vh; overflow:auto; }
+  .modal h2{ font-size:17px; margin-bottom:16px; }
+
+  .sheet-wrap{ background:#3d4640; padding:32px 16px; border-radius:12px; }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .sheet-wrap{ background:#0c1310; } }
+  :root[data-theme="dark"] .sheet-wrap{ background:#0c1310; }
+  .sheet{
+    background:#ffffff; color:#181c1a;
+    max-width:760px; margin:0 auto;
+    padding:48px 44px; border-radius:3px;
+    box-shadow:0 8px 30px -6px rgba(0,0,0,0.4);
+  }
+  .sheet-head{ display:flex; justify-content:space-between; gap:20px; align-items:flex-start; padding-bottom:22px; border-bottom:2px solid #181c1a; }
+  .sheet-brand{ font-family:'Archivo'; font-weight:700; font-size:19px; }
+  .sheet-meta-line{ font-size:12.5px; color:#4b544e; margin-top:2px; }
+  .sheet-doctitle{ text-align:right; }
+  .sheet-doctitle .kind{ font-family:'Archivo'; font-weight:700; font-size:20px; letter-spacing:0.02em; }
+  .sheet-doctitle .num{ font-family:'IBM Plex Mono'; font-size:14px; color:#4b544e; margin-top:2px; }
+  .sheet-parties{ display:flex; justify-content:space-between; gap:24px; margin:26px 0; }
+  .sheet-parties .label{ font-size:10.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#8a9189; margin-bottom:5px; }
+  .sheet-parties .block{ font-size:13.5px; line-height:1.55; }
+  .sheet-dates{ font-size:12.5px; color:#4b544e; text-align:right; }
+  .sheet table{ font-size:13px; }
+  .sheet th{ color:#8a9189; border-bottom:2px solid #181c1a; padding-bottom:8px; }
+  .sheet td{ border-bottom:1px solid #dfe3de; padding:10px 12px; }
+  .sheet .totals-row{ font-size:13.5px; }
+  .sheet .totals-row.total{ border-top:2px solid #181c1a; }
+  .sheet-notes{ margin-top:26px; font-size:12.5px; color:#39413c; background:#f4f6f3; border-radius:6px; padding:12px 14px; white-space:pre-wrap; }
+  .sheet-pay{ margin-top:18px; font-size:12.5px; color:#39413c; }
+  .sheet-pay .label{ font-size:10.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#8a9189; margin-bottom:5px; }
+  .sheet-foot{ margin-top:34px; padding-top:14px; border-top:1px solid #dfe3de; font-size:11.5px; color:#8a9189; text-align:center; }
+  .sheet tbody tr:hover{ background:transparent; }
+
+  .doc-toolbar{ display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+  .status-actions{ display:flex; gap:8px; flex-wrap:wrap; }
+
+  .banner{ display:flex; gap:10px; align-items:flex-start; padding:12px 14px; border-radius:8px; background:var(--accent-soft); color:var(--accent-ink); font-size:13.5px; margin-bottom:18px; }
+  .confirm-inline{ display:flex; gap:6px; align-items:center; }
+
+  @media print{
+    body *{ visibility:hidden; }
+    .sheet, .sheet *{ visibility:visible; }
+    .sheet-wrap{ background:none; padding:0; }
+    .sheet{ box-shadow:none; position:absolute; top:0; left:0; width:100%; max-width:none; padding:0; margin:0; }
+    @page{ margin:16mm; }
+  }
+</style>
+
+<script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore-compat.js"></script>
+<div id="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">Engelbrecht Invoicing</span>
+      <span class="brand-sub" id="sync-indicator"></span>
+    </div>
+    <nav class="tabs" id="tabs"></nav>
+    <div class="topbar-spacer"></div>
+  </div>
+</div>
+<main id="view"></main>
+<div id="modal-root"></div>
+
+<script>
+(function(){
+  'use strict';
+
+  /* ---------------- formatting helpers ---------------- */
+  function fmtMoney(n){
+    n = Number(n)||0;
+    try{ return new Intl.NumberFormat('en-ZA', {style:'currency', currency:'ZAR'}).format(n); }
+    catch(e){ return 'R ' + n.toFixed(2); }
+  }
+  function fmtDate(iso){
+    if(!iso) return '—';
+    var d = new Date(iso + 'T00:00:00');
+    if(isNaN(d)) return '—';
+    return d.toLocaleDateString('en-ZA', {day:'2-digit', month:'short', year:'numeric'});
+  }
+  function todayISO(){ return new Date().toISOString().slice(0,10); }
+  function addDays(iso, n){
+    var d = new Date(iso + 'T00:00:00');
+    d.setDate(d.getDate() + n);
+    return d.toISOString().slice(0,10);
+  }
+  function uid(){ return Math.random().toString(36).slice(2,10); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function pad4(n){ n = Math.max(1, n|0); return String(n).padStart(4,'0'); }
+
+  /* ---------------- state ---------------- */
+  var dbNS = null;          // resolved db capability namespace, or null
+  var business = defaultBusiness();
+  var clients = [];
+  var docs = [];
+  var counters = { invoice: 1, quote: 1 };
+  var view = { name: 'dashboard', params: {} };
+  var draft = null;         // document editor working copy
+  var uiConfirm = null;     // id of row showing inline delete-confirm
+  var modal = null;         // {type:'client', editingId:null} etc
+
+  function defaultBusiness(){
+    return {
+      legalName: 'Charl Engelbrecht',
+      email: '',
+      phone: '',
+      address: '',
+      regNumber: '',
+      vatNumber: '',
+      bankName: '',
+      accountHolder: 'Charl Engelbrecht',
+      accountNumber: '',
+      branchCode: '',
+      accountType: 'Cheque / Current'
+    };
+  }
+
+  /* ---------------- Firebase-backed db ----------------
+     Data lives in one free Firebase project (Firestore), gated behind
+     Firebase Authentication. Sign in once per device — no file copying, no
+     cloud-sync folder, works on literally any device including iPhone.
+     Everything is scoped under users/{yourUid}/... and Firestore security
+     rules only allow you to read or write your own data. Same
+     doc()/collection() shape as the earlier versions, so none of the
+     business logic above needed to change. */
+
+  var firebaseConfig = {
+    apiKey: "AIzaSyAIpsGOfjh7wizPhWHQsUyAFGMDk_B23fQ",
+    authDomain: "engelbrecht-invoicing.firebaseapp.com",
+    projectId: "engelbrecht-invoicing",
+    storageBucket: "engelbrecht-invoicing.firebasestorage.app",
+    messagingSenderId: "930106558736",
+    appId: "1:930106558736:web:6cf4ffd5c5c569632afd95"
+  };
+  firebase.initializeApp(firebaseConfig);
+  var auth = firebase.auth();
+  var firestore = firebase.firestore();
+
+  var currentUser = null;
+  var authMode = 'signin';   // 'signin' | 'signup'
+  var authEmailValue = '';
+  var authBusy = false;
+  var authError = '';
+  var unsubscribers = [];
+  // checking | signed-out | signed-in
+  var connectState = 'checking';
+
+  function userPath(sub){ return 'users/' + currentUser.uid + '/' + sub; }
+  function toDocSnap(snap){
+    return { id: snap.id, exists: snap.exists, data: function(){ return snap.data() || {}; } };
+  }
+  function toQuerySnap(qs){
+    var docs = qs.docs.map(toDocSnap);
+    return { docs: docs, size: docs.length, empty: docs.length === 0 };
+  }
+  function makeDocRef(path){
+    var ref = firestore.doc(path);
+    return {
+      id: ref.id,
+      path: path,
+      get: function(){ return ref.get().then(toDocSnap); },
+      set: function(data){ return ref.set(data); },
+      update: function(data){ return ref.update(data); },
+      delete: function(){ return ref.delete(); },
+      onSnapshot: function(next){
+        return ref.onSnapshot(function(snap){ next(toDocSnap(snap)); }, function(err){ console.error('onSnapshot', path, err); });
+      },
+      collection: function(sub){ return makeCollectionRef(path + '/' + sub); }
+    };
+  }
+  function makeCollectionRef(collPath){
+    var ref = firestore.collection(collPath);
+    return {
+      path: collPath,
+      doc: function(id){ return makeDocRef(collPath + '/' + (id || ref.doc().id)); },
+      add: function(data){ return ref.add(data).then(function(docRef){ return makeDocRef(collPath + '/' + docRef.id); }); },
+      onSnapshot: function(next){
+        return ref.onSnapshot(function(qs){ next(toQuerySnap(qs)); }, function(err){ console.error('onSnapshot', collPath, err); });
+      }
+    };
+  }
+
+  function seedInitialClientsIfEmpty(){
+    var clientsRef = firestore.collection(userPath('clients'));
+    return clientsRef.limit(1).get().then(function(qs){
+      if(!qs.empty) return;
+      var seedClients = [
+        {id:'fluid-control-services', name:'Fluid Control Services', company:'', email:'armand@fcs-web.com', phone:'+27871470861', address:'PO Box 90015\nBertsham, 2013\nSouth Africa', vatNumber:''},
+        {id:'wallys-pub', name:"Wally's Pub", company:'', email:'wallyspub@yahoo.com', phone:'', address:'', vatNumber:''},
+        {id:'andre', name:'Andre', company:'', email:'n@a.com', phone:'', address:'', vatNumber:''},
+        {id:'a-squared-holdings', name:'Armand Strydom', company:'A Squared Holdings Pty Ltd', email:'armand.strydom23@gmail.com', phone:'', address:'', vatNumber:''},
+        {id:'atlas-finance', name:'Ethan', company:'Atlas Finance', email:'ethan@atcorp.co.za', phone:'+27781590792', address:'123 Oxford Road\nSaxonworld', vatNumber:''},
+        {id:'perssol', name:'Renier Oosthuizen', company:'Perssol PTY (Ltd)', email:'renier@perssol.co.za', phone:'+27733573832', address:'60A Lombard street\nRaceview\nSouth Africa', vatNumber:''},
+        {id:'southern-eight', name:'Shaun Howell', company:'Southern Eight', email:'shaun@southerneight.com', phone:'+27726984668', address:'', vatNumber:''},
+        {id:'bfg-engineering-brokers', name:'BFG Engineering Brokers (PTY) LTD', company:'', email:'accounts@bfgengineering.co.za', phone:'', address:'Trading as: BFG Gaurantees\n2 Robin Close, Infinity Office Park\nBlock A, 2nd floor\nMeyersdal, 1148\nSouth Africa', vatNumber:'4240283491'},
+        {id:'macs-cool', name:'MACS Cool (Pty) Ltd', company:'', email:'bmmain@macsauto.co.za', phone:'', address:'21 Prop Street\nSelby\nJHB, 2001\nSouth Africa', vatNumber:'4370220487'}
+      ];
+      var batch = firestore.batch();
+      seedClients.forEach(function(c){
+        var id = c.id; var data = Object.assign({}, c); delete data.id;
+        batch.set(firestore.doc(userPath('clients') + '/' + id), data);
+      });
+      return batch.commit();
+    });
+  }
+
+  function setupSubscriptions(){
+    dbNS = { doc: function(p){ return makeDocRef(userPath(p)); }, collection: function(p){ return makeCollectionRef(userPath(p)); } };
+    unsubscribers.push(dbNS.doc('settings/business').onSnapshot(function(snap){
+      business = snap.exists ? Object.assign(defaultBusiness(), snap.data()) : defaultBusiness();
+      render();
+    }));
+    unsubscribers.push(dbNS.collection('clients').onSnapshot(function(qs){
+      clients = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      clients.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+      render();
+    }));
+    unsubscribers.push(dbNS.collection('documents').onSnapshot(function(qs){
+      docs = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      docs.sort(function(a,b){ return (b.createdAt||'').localeCompare(a.createdAt||''); });
+      render();
+    }));
+    unsubscribers.push(dbNS.doc('counters/invoice').onSnapshot(function(snap){
+      counters.invoice = snap.exists ? (snap.data().next || 1) : 1;
+    }));
+    unsubscribers.push(dbNS.doc('counters/quote').onSnapshot(function(snap){
+      counters.quote = snap.exists ? (snap.data().next || 1) : 1;
+    }));
+  }
+  function teardownSubscriptions(){
+    unsubscribers.forEach(function(u){ try{ u(); }catch(e){} });
+    unsubscribers = [];
+    dbNS = null;
+    business = defaultBusiness(); clients = []; docs = []; counters = {invoice:1, quote:1};
+  }
+
+  function friendlyAuthError(err){
+    var map = {
+      'auth/invalid-email': "That email address doesn't look right.",
+      'auth/user-not-found': 'No account with that email yet — use "Create an account" below.',
+      'auth/wrong-password': 'Wrong password.',
+      'auth/invalid-credential': 'Email or password is incorrect.',
+      'auth/email-already-in-use': 'An account already exists with that email — sign in instead.',
+      'auth/weak-password': 'Use at least 6 characters for your password.',
+      'auth/too-many-requests': 'Too many attempts — wait a bit and try again.',
+      'auth/network-request-failed': 'Could not reach the server — check your connection.'
+    };
+    return (err && map[err.code]) || (err && err.message) || 'Something went wrong. Try again.';
+  }
+  function signUp(email, password){
+    authBusy = true; authError = ''; render();
+    auth.createUserWithEmailAndPassword(email, password).catch(function(err){
+      authBusy = false; authError = friendlyAuthError(err); render();
+    });
+  }
+  function signIn(email, password){
+    authBusy = true; authError = ''; render();
+    auth.signInWithEmailAndPassword(email, password).catch(function(err){
+      authBusy = false; authError = friendlyAuthError(err); render();
+    });
+  }
+  function signOutNow(){ auth.signOut(); }
+
+  auth.onAuthStateChanged(function(user){
+    authBusy = false;
+    if(user){
+      currentUser = user;
+      connectState = 'signed-in';
+      seedInitialClientsIfEmpty().catch(function(e){ console.error(e); }).then(function(){
+        setupSubscriptions();
+        render();
+      });
+    } else {
+      teardownSubscriptions();
+      currentUser = null;
+      connectState = 'signed-out';
+      authMode = 'signin';
+      render();
+    }
+  });
+
+  function nextNumber(kind){
+    var n = kind === 'invoice' ? counters.invoice : counters.quote;
+    var prefix = kind === 'invoice' ? 'INV-' : 'QUO-';
+    return prefix + pad4(n);
+  }
+  function bumpCounter(kind){
+    var n = (kind === 'invoice' ? counters.invoice : counters.quote) + 1;
+    if(kind === 'invoice'){ counters.invoice = n; } else { counters.quote = n; }
+    if(dbNS) dbNS.doc('counters/' + kind).set({ next: n });
+  }
+
+  /* ---------------- navigation ---------------- */
+  function go(name, params){
+    view = { name: name, params: params || {} };
+    uiConfirm = null;
+    if(name === 'newDoc'){
+      draft = params && params.editId ? loadDraftFrom(docs.find(function(d){ return d.id === params.editId; })) : blankDraft(params && params.kind || 'invoice');
+    }
+    window.scrollTo(0,0);
+    render();
+  }
+
+  /* ---------------- document editor model ---------------- */
+  function blankDraft(kind){
+    return {
+      id: null,
+      kind: kind,
+      status: 'Draft',
+      number: null,
+      clientId: '',
+      clientSnapshot: null,
+      dateIssued: todayISO(),
+      dateDue: kind === 'invoice' ? addDays(todayISO(), 7) : addDays(todayISO(), 14),
+      items: [ {description:'', qty:1, unitPrice:0} ],
+      vatEnabled: false,
+      notes: kind === 'invoice' ? 'Payment due within 7 days of the invoice date. Thank you for your business.' : 'This quote is valid for 14 days from the date above.',
+      createdAt: null,
+      convertedToInvoice: null,
+      fromQuote: null
+    };
+  }
+  function loadDraftFrom(d){
+    if(!d) return blankDraft('invoice');
+    var copy = JSON.parse(JSON.stringify(d));
+    if(!copy.items || !copy.items.length) copy.items = [{description:'', qty:1, unitPrice:0}];
+    return copy;
+  }
+  function draftTotals(){
+    var subtotal = (draft.items||[]).reduce(function(sum, it){ return sum + (Number(it.qty)||0) * (Number(it.unitPrice)||0); }, 0);
+    var vat = draft.vatEnabled ? subtotal * 0.15 : 0;
+    return { subtotal: subtotal, vat: vat, total: subtotal + vat };
+  }
+  function docTotals(d){
+    var subtotal = (d.items||[]).reduce(function(sum, it){ return sum + (Number(it.qty)||0) * (Number(it.unitPrice)||0); }, 0);
+    var vat = d.vatEnabled ? subtotal * 0.15 : 0;
+    return { subtotal: subtotal, vat: vat, total: subtotal + vat };
+  }
+
+  function saveDraft(){
+    if(!dbNS) return;
+    if(!draft.clientId){ alertBanner('Choose a client before saving.'); return; }
+    var client = clients.find(function(c){ return c.id === draft.clientId; });
+    draft.clientSnapshot = client ? {name:client.name, company:client.company, email:client.email, phone:client.phone, address:client.address, vatNumber:client.vatNumber} : draft.clientSnapshot;
+    draft.items = (draft.items||[]).filter(function(it){ return (it.description||'').trim() !== '' || Number(it.unitPrice) || Number(it.qty) !== 1; });
+    if(!draft.items.length) draft.items = [{description:'Services rendered', qty:1, unitPrice:0}];
+
+    if(!draft.id){
+      draft.number = nextNumber(draft.kind);
+      draft.createdAt = new Date().toISOString();
+      var toSave = Object.assign({}, draft); delete toSave.id;
+      dbNS.collection('documents').add(toSave).then(function(ref){
+        bumpCounter(draft.kind);
+        go('viewDoc', {id: ref.id});
+      });
+    } else {
+      var id = draft.id;
+      var toSave2 = Object.assign({}, draft); delete toSave2.id;
+      dbNS.doc('documents/' + id).set(toSave2).then(function(){
+        go('viewDoc', {id: id});
+      });
+    }
+  }
+
+  var banner = null;
+  function alertBanner(msg){ banner = msg; render(); setTimeout(function(){ banner = null; render(); }, 3200); }
+
+  function setStatus(id, status){
+    if(!dbNS) return;
+    dbNS.doc('documents/' + id).update({status: status});
+  }
+  function deleteDoc(id){
+    if(!dbNS) return;
+    dbNS.doc('documents/' + id).delete();
+    if(view.name === 'viewDoc' && view.params.id === id) go('documents');
+  }
+  function duplicateDoc(d){
+    var copy = JSON.parse(JSON.stringify(d));
+    copy.id = null; copy.status = 'Draft'; copy.number = null; copy.createdAt = null;
+    copy.dateIssued = todayISO();
+    copy.dateDue = d.kind === 'invoice' ? addDays(todayISO(),7) : addDays(todayISO(),14);
+    copy.convertedToInvoice = null; copy.fromQuote = null;
+    view = { name: 'newDoc', params: {} };
+    draft = copy;
+    uiConfirm = null;
+    window.scrollTo(0,0);
+    render();
+  }
+  function convertToInvoice(q){
+    var inv = JSON.parse(JSON.stringify(q));
+    inv.id = null; inv.kind = 'invoice'; inv.status = 'Draft'; inv.number = null; inv.createdAt = null;
+    inv.dateIssued = todayISO(); inv.dateDue = addDays(todayISO(), 7);
+    inv.fromQuote = q.number; inv.convertedToInvoice = null;
+    if(!dbNS) return;
+    inv.number = nextNumber('invoice');
+    inv.createdAt = new Date().toISOString();
+    var toSave = Object.assign({}, inv); delete toSave.id;
+    dbNS.collection('documents').add(toSave).then(function(ref){
+      bumpCounter('invoice');
+      dbNS.doc('documents/' + q.id).update({convertedToInvoice: inv.number});
+      go('viewDoc', {id: ref.id});
+    });
+  }
+
+  /* ---------------- clients ---------------- */
+  function saveClient(data, editingId){
+    if(!dbNS) return;
+    if(editingId){
+      dbNS.doc('clients/' + editingId).set(data);
+      return editingId;
+    } else {
+      var ref = dbNS.collection('clients').doc();
+      ref.set(data);
+      return ref.id;
+    }
+  }
+  function deleteClient(id){ if(dbNS) dbNS.doc('clients/' + id).delete(); }
+
+  /* ---------------- settings ---------------- */
+  function saveBusiness(data){ if(dbNS) dbNS.doc('settings/business').set(data); }
+
+  /* ============================================================
+     RENDER
+     ============================================================ */
+  var TABS = [
+    {name:'dashboard', label:'Dashboard'},
+    {name:'documents', label:'Documents'},
+    {name:'clients', label:'Clients'},
+    {name:'settings', label:'Settings'}
+  ];
+
+  function render(){
+    renderTabs();
+    var el = document.getElementById('view');
+    if(connectState !== 'signed-in'){
+      el.innerHTML = renderAuthGate();
+      renderModal();
+      return;
+    }
+    var html = '';
+    if(banner) html += '<div class="banner">⚠️ ' + esc(banner) + '</div>';
+    switch(view.name){
+      case 'documents': html += renderDocuments(); break;
+      case 'clients': html += renderClients(); break;
+      case 'settings': html += renderSettings(); break;
+      case 'newDoc': html += renderEditor(); break;
+      case 'viewDoc': html += renderDocView(); break;
+      default: html += renderDashboard();
+    }
+    el.innerHTML = html;
+    renderModal();
+    if(view.name === 'newDoc') wireEditorEvents();
+  }
+
+  function renderTabs(){
+    var t = document.getElementById('tabs');
+    t.innerHTML = TABS.map(function(tb){
+      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents');
+      return '<button class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '">' + tb.label + '</button>';
+    }).join('');
+
+    var ind = document.getElementById('sync-indicator');
+    if(ind){
+      ind.textContent = connectState === 'signed-in' ? ('synced · ' + (currentUser ? currentUser.email : ''))
+        : '';
+    }
+  }
+
+  function renderAuthGate(){
+    var boxOpen = '<div class="empty card card-pad" style="margin-top:40px; max-width:420px; margin-left:auto; margin-right:auto; text-align:left;">';
+    var boxClose = '</div>';
+
+    if(connectState === 'checking'){
+      return '<div class="empty"><div class="empty-icon">🧾</div><p>Loading…</p></div>';
+    }
+
+    var isSignup = authMode === 'signup';
+    var html = boxOpen;
+    html += '<div class="empty-icon" style="text-align:center;">🧾</div>' +
+      '<h3 style="text-align:center;">' + (isSignup ? 'Create your account' : 'Sign in') + '</h3>' +
+      '<p style="text-align:center;">' + (isSignup ? 'One account, works on every device — phone, tablet, laptop, no file copying.' : 'Sign in to reach your clients, invoices and quotes.') + '</p>';
+    if(authError) html += '<div class="banner">⚠️ ' + esc(authError) + '</div>';
+    html += '<form id="auth-form">';
+    html += field('auth-email','Email', authEmailValue, 'email');
+    html += field('auth-password','Password', '', 'password');
+    html += '<div class="actions-row" style="justify-content:center; margin-top:6px;">' +
+      '<button type="submit" class="btn btn-primary" style="width:100%; justify-content:center;"' + (authBusy?' disabled':'') + '>' +
+      (authBusy ? 'Please wait…' : (isSignup ? 'Create account' : 'Sign in')) + '</button></div>';
+    html += '</form>';
+    html += '<p class="hint" style="text-align:center; margin-top:14px;">' +
+      (isSignup ? 'Already set up? <a href="#" data-auth-mode="signin">Sign in instead</a>' : 'First time on this app? <a href="#" data-auth-mode="signup">Create an account</a>') +
+      '</p>';
+    html += boxClose;
+    return html;
+  }
+
+  /* ---------- dashboard ---------- */
+  function renderDashboard(){
+    var outstanding = docs.filter(function(d){ return d.kind==='invoice' && d.status==='Sent'; })
+      .reduce(function(s,d){ return s + docTotals(d).total; }, 0);
+    var overdueCount = docs.filter(isOverdue).length;
+    var draftCount = docs.filter(function(d){ return d.status==='Draft'; }).length;
+
+    var recent = docs.slice(0,6);
+
+    var html = '<div class="view-head"><div><h1>Dashboard</h1><div class="view-sub">' + esc(business.legalName || 'Charl Engelbrecht') + '</div></div>' +
+      '<div class="actions-row">' +
+      '<button class="btn btn-primary" data-nav="newDoc" data-kind="invoice">+ New invoice</button>' +
+      '<button class="btn" data-nav="newDoc" data-kind="quote">+ New quote</button>' +
+      '</div></div>';
+
+    html += '<div class="grid grid-4" style="margin-bottom:22px;">' +
+      statCard('Outstanding', fmtMoney(outstanding), 'accent') +
+      statCard('Overdue', String(overdueCount), overdueCount ? 'warn' : '') +
+      statCard('Drafts', String(draftCount), '') +
+      statCard('Clients', String(clients.length), '') +
+      '</div>';
+
+    html += '<div class="card"><div class="card-pad" style="padding-bottom:12px;"><h2 style="font-size:16px;">Recent documents</h2></div>';
+    if(!recent.length){
+      html += emptyState('📄','No documents yet','Create your first invoice or quote — it only takes a minute.', [
+        {label:'New invoice', nav:'newDoc', kind:'invoice', primary:true},
+        {label:'New quote', nav:'newDoc', kind:'quote'}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Status</th><th class="num-cell" style="text-align:right;">Total</th></tr></thead><tbody>';
+      recent.forEach(function(d){
+        html += '<tr class="row-link" data-nav="viewDoc" data-id="' + d.id + '">' +
+          '<td class="mono">' + esc(d.number) + '</td>' +
+          '<td>' + esc(clientLabel(d)) + '</td>' +
+          '<td>' + fmtDate(d.dateIssued) + '</td>' +
+          '<td>' + statusBadge(d) + '</td>' +
+          '<td class="num-cell">' + fmtMoney(docTotals(d).total) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  function statCard(label, value, tone){
+    return '<div class="card stat"><div class="stat-label">' + label + '</div><div class="stat-value' + (tone?' '+tone:'') + '">' + value + '</div></div>';
+  }
+  function emptyState(icon, title, sub, buttons){
+    return '<div class="empty">' +
+      '<div class="empty-icon">'+icon+'</div><h3>'+esc(title)+'</h3><p>'+esc(sub)+'</p>' +
+      '<div class="actions-row" style="justify-content:center;">' +
+      buttons.map(function(b){
+        var attr = b.modal ? 'data-modal="'+b.modal+'"' : ('data-nav="'+b.nav+'"'+(b.kind?' data-kind="'+b.kind+'"':''));
+        return '<button class="btn '+(b.primary?'btn-primary':'')+'" '+attr+'>'+esc(b.label)+'</button>';
+      }).join('') +
+      '</div></div>';
+  }
+
+  function isOverdue(d){
+    return d.kind==='invoice' && d.status==='Sent' && d.dateDue && d.dateDue < todayISO();
+  }
+  function clientLabel(d){
+    var c = d.clientSnapshot;
+    if(!c) return '—';
+    return c.company ? (c.name + ' · ' + c.company) : c.name;
+  }
+  function statusBadge(d){
+    if(isOverdue(d)) return '<span class="badge badge-overdue">Overdue</span>';
+    var cls = {Draft:'badge-draft', Sent:'badge-sent', Paid:'badge-paid', Accepted:'badge-accepted', Declined:'badge-declined'}[d.status] || 'badge-draft';
+    return '<span class="badge ' + cls + '">' + esc(d.status) + '</span>';
+  }
+
+  /* ---------- documents list ---------- */
+  var docFilter = 'all';
+  function renderDocuments(){
+    var list = docs.filter(function(d){ return docFilter==='all' || d.kind===docFilter; });
+    var html = '<div class="view-head"><div><h1>Documents</h1><div class="view-sub">All invoices and quotes</div></div>' +
+      '<div class="actions-row">' +
+      '<button class="btn btn-primary" data-nav="newDoc" data-kind="invoice">+ New invoice</button>' +
+      '<button class="btn" data-nav="newDoc" data-kind="quote">+ New quote</button>' +
+      '</div></div>';
+
+    html += '<div class="actions-row" style="margin-bottom:14px;">' +
+      filterBtn('all','All') + filterBtn('invoice','Invoices') + filterBtn('quote','Quotes') + '</div>';
+
+    html += '<div class="card">';
+    if(!list.length){
+      html += emptyState('📄', docFilter==='all' ? 'No documents yet' : 'None here yet', 'Create your first ' + (docFilter==='quote'?'quote':'invoice') + ' to see it listed here.', [
+        {label:'New invoice', nav:'newDoc', kind:'invoice', primary:true},
+        {label:'New quote', nav:'newDoc', kind:'quote'}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Number</th><th>Type</th><th>Client</th><th>Date</th><th>Status</th><th style="text-align:right;">Total</th></tr></thead><tbody>';
+      list.forEach(function(d){
+        html += '<tr class="row-link" data-nav="viewDoc" data-id="' + d.id + '">' +
+          '<td class="mono">' + esc(d.number) + '</td>' +
+          '<td><span class="badge ' + (d.kind==='invoice'?'badge-invoice':'badge-quote') + '">' + (d.kind==='invoice'?'Invoice':'Quote') + '</span></td>' +
+          '<td>' + esc(clientLabel(d)) + '</td>' +
+          '<td>' + fmtDate(d.dateIssued) + '</td>' +
+          '<td>' + statusBadge(d) + '</td>' +
+          '<td class="num-cell">' + fmtMoney(docTotals(d).total) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  function filterBtn(val,label){
+    return '<button class="btn btn-sm' + (docFilter===val?' btn-primary':'') + '" data-filter-doc="' + val + '">' + label + '</button>';
+  }
+
+  /* ---------- clients ---------- */
+  function renderClients(){
+    var html = '<div class="view-head"><div><h1>Clients</h1><div class="view-sub">Saved client details for faster invoicing</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-modal="client">+ Add client</button></div></div>';
+
+    html += '<div class="card">';
+    if(!clients.length){
+      html += emptyState('👤','No clients yet','Add a client once, then reuse their details on every invoice and quote.', [
+        {label:'Add client', modal:'client', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Phone</th><th>Documents</th><th></th></tr></thead><tbody>';
+      clients.forEach(function(c){
+        var count = docs.filter(function(d){ return d.clientId===c.id; }).length;
+        html += '<tr>' +
+          '<td>' + esc(c.name) + '</td>' +
+          '<td>' + esc(c.company||'—') + '</td>' +
+          '<td>' + esc(c.email||'—') + '</td>' +
+          '<td>' + esc(c.phone||'—') + '</td>' +
+          '<td class="mono">' + count + '</td>' +
+          '<td style="text-align:right; white-space:nowrap;">';
+        if(uiConfirm === 'client-' + c.id){
+          html += '<span class="confirm-inline">Delete? <button class="btn btn-sm btn-danger" data-confirm-delete-client="'+c.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+        } else {
+          html += '<button class="btn btn-sm btn-ghost" data-edit-client="'+c.id+'">Edit</button> ' +
+            '<button class="btn btn-sm btn-ghost btn-danger" data-ask-delete-client="'+c.id+'">Delete</button>';
+        }
+        html += '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- settings ---------- */
+  function renderSettings(){
+    var b = business;
+    var html = '<div class="view-head"><div><h1>Settings</h1><div class="view-sub">Your details, shown on every invoice and quote</div></div></div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:20px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:10px; color:var(--ink-soft);">Account</h3>';
+    html += '<p class="hint" style="margin-bottom:12px;">Signed in as <strong>' + esc(currentUser ? currentUser.email : '') + '</strong>. Your data syncs automatically to every device you sign in on — no file copying.</p>';
+    html += '<div class="actions-row">';
+    html += '<button type="button" class="btn btn-sm btn-ghost btn-danger" data-sign-out>Sign out</button>';
+    html += '</div></div>';
+
+    html += '<div class="card card-pad">';
+    html += '<form id="business-form">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Business details</h3>';
+    html += fieldRow([
+      field('legalName','Trading name', b.legalName, 'text'),
+      field('regNumber','Registration / VAT no. (optional)', b.regNumber, 'text')
+    ]);
+    html += fieldRow([
+      field('email','Email', b.email, 'email'),
+      field('phone','Phone', b.phone, 'text')
+    ]);
+    html += field('address','Address', b.address, 'textarea');
+
+    html += '<h3 style="font-size:14px; margin:20px 0 14px; color:var(--ink-soft);">Banking details <span style="font-weight:400; color:var(--ink-faint);">— shown on invoices so clients can pay you</span></h3>';
+    html += fieldRow([
+      field('bankName','Bank', b.bankName, 'text'),
+      field('accountHolder','Account holder', b.accountHolder, 'text')
+    ]);
+    html += fieldRow([
+      field('accountNumber','Account number', b.accountNumber, 'text'),
+      field('branchCode','Branch code', b.branchCode, 'text')
+    ]);
+    html += field('accountType','Account type', b.accountType, 'text');
+
+    html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save settings</button></div>';
+    html += '</form></div>';
+    return html;
+  }
+  function field(name,label,value,type){
+    if(type==='textarea'){
+      return '<div class="field"><label>'+label+'</label><textarea name="'+name+'">'+esc(value)+'</textarea></div>';
+    }
+    return '<div class="field"><label>'+label+'</label><input name="'+name+'" type="'+type+'" value="'+esc(value)+'"></div>';
+  }
+  function fieldRow(fields){ return '<div class="field-row">'+fields.join('')+'</div>'; }
+
+  /* ---------- editor ---------- */
+  function renderEditor(){
+    var d = draft;
+    var t = draftTotals();
+    var kindLabel = d.kind==='invoice' ? 'Invoice' : 'Quote';
+    var html = '<div class="view-head"><div><h1>' + (d.id?'Edit ':'New ') + kindLabel + '</h1>' +
+      '<div class="view-sub">' + (d.number ? d.number : 'Number assigned on save') + '</div></div>' +
+      '<div class="actions-row"><button class="btn" data-nav="documents">Cancel</button><button class="btn btn-primary" id="save-doc-btn">Save document</button></div></div>';
+
+    html += '<div class="card card-pad">';
+
+    if(!d.id){
+      html += '<div class="field" style="max-width:260px;"><label>Document type</label><select id="f-kind">' +
+        '<option value="invoice"'+(d.kind==='invoice'?' selected':'')+'>Invoice</option>' +
+        '<option value="quote"'+(d.kind==='quote'?' selected':'')+'>Quote</option>' +
+        '</select></div>';
+    }
+
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Client</label><select id="f-client">' +
+      '<option value="">Choose a client…</option>' +
+      clients.map(function(c){ return '<option value="'+c.id+'"'+(d.clientId===c.id?' selected':'')+'>'+esc(c.name)+(c.company?' — '+esc(c.company):'')+'</option>'; }).join('') +
+      '</select><div class="hint"><a href="#" id="add-client-inline">+ Add a new client</a></div></div>';
+    html += '<div class="field"><label>' + (d.kind==='invoice'?'Due date':'Valid until') + '</label><input id="f-due" type="date" value="'+esc(d.dateDue)+'"></div>';
+    html += '</div>';
+
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Date issued</label><input id="f-issued" type="date" value="'+esc(d.dateIssued)+'"></div>';
+    html += '<div class="field"><div class="switch-row" style="margin-top:22px;"><span style="font-size:13.5px; font-weight:600;">Add 15% VAT</span><label class="switch"><input type="checkbox" id="f-vat" '+(d.vatEnabled?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div></div>';
+    html += '</div>';
+
+    html += '<h3 style="font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:22px 0 10px;">Line items</h3>';
+    html += '<div class="table-wrap"><table class="items-table"><thead><tr><th class="desc-col">Description</th><th class="num-col">Qty</th><th class="num-col">Unit price</th><th class="num-col">Line total</th><th class="del-col"></th></tr></thead><tbody id="items-body">';
+    html += d.items.map(function(it,i){ return itemRow(it,i); }).join('');
+    html += '</tbody></table></div>';
+    html += '<button class="btn btn-sm" id="add-item-btn" style="margin-top:10px;">+ Add line</button>';
+
+    html += '<div class="totals" style="margin-top:22px;">' +
+      '<div class="totals-row"><span>Subtotal</span><span class="mono" id="t-subtotal">'+fmtMoney(t.subtotal)+'</span></div>' +
+      (d.vatEnabled ? '<div class="totals-row"><span>VAT (15%)</span><span class="mono" id="t-vat">'+fmtMoney(t.vat)+'</span></div>' : '') +
+      '<div class="totals-row total"><span>Total</span><span class="mono" id="t-total">'+fmtMoney(t.total)+'</span></div>' +
+      '</div>';
+
+    html += '<div class="field" style="margin-top:22px;"><label>Notes / terms</label><textarea id="f-notes">'+esc(d.notes)+'</textarea></div>';
+    html += '</div>';
+    return html;
+  }
+  function itemRow(it,i){
+    var lineTotal = (Number(it.qty)||0) * (Number(it.unitPrice)||0);
+    return '<tr data-idx="'+i+'">' +
+      '<td><input class="it-desc" type="text" value="'+esc(it.description)+'" placeholder="What did you do for them?"></td>' +
+      '<td><input class="it-qty mono" type="number" min="0" step="0.5" value="'+it.qty+'"></td>' +
+      '<td><input class="it-price mono" type="number" min="0" step="0.01" value="'+it.unitPrice+'"></td>' +
+      '<td class="num-cell mono" data-line-total>'+fmtMoney(lineTotal)+'</td>' +
+      '<td><button class="btn btn-sm btn-ghost btn-danger" data-remove-item="'+i+'" title="Remove line">✕</button></td>' +
+      '</tr>';
+  }
+
+  function wireEditorEvents(){
+    var kindSel = document.getElementById('f-kind');
+    if(kindSel) kindSel.addEventListener('change', function(){ draft.kind = this.value; render(); wireEditorEvents(); });
+
+    var clientSel = document.getElementById('f-client');
+    if(clientSel) clientSel.addEventListener('change', function(){ draft.clientId = this.value; });
+
+    var dueEl = document.getElementById('f-due');
+    if(dueEl) dueEl.addEventListener('change', function(){ draft.dateDue = this.value; });
+    var issuedEl = document.getElementById('f-issued');
+    if(issuedEl) issuedEl.addEventListener('change', function(){ draft.dateIssued = this.value; });
+    var vatEl = document.getElementById('f-vat');
+    if(vatEl) vatEl.addEventListener('change', function(){ draft.vatEnabled = this.checked; render(); wireEditorEvents(); });
+    var notesEl = document.getElementById('f-notes');
+    if(notesEl) notesEl.addEventListener('input', function(){ draft.notes = this.value; });
+
+    document.getElementById('items-body').addEventListener('input', function(e){
+      var tr = e.target.closest('tr'); if(!tr) return;
+      var idx = Number(tr.getAttribute('data-idx'));
+      if(e.target.classList.contains('it-desc')) draft.items[idx].description = e.target.value;
+      if(e.target.classList.contains('it-qty')) draft.items[idx].qty = Number(e.target.value)||0;
+      if(e.target.classList.contains('it-price')) draft.items[idx].unitPrice = Number(e.target.value)||0;
+      var lt = (Number(draft.items[idx].qty)||0) * (Number(draft.items[idx].unitPrice)||0);
+      tr.querySelector('[data-line-total]').textContent = fmtMoney(lt);
+      updateTotalsDisplay();
+    });
+
+    document.getElementById('add-item-btn').addEventListener('click', function(){
+      draft.items.push({description:'', qty:1, unitPrice:0});
+      render(); wireEditorEvents();
+    });
+    document.getElementById('items-body').addEventListener('click', function(e){
+      var btn = e.target.closest('[data-remove-item]'); if(!btn) return;
+      var idx = Number(btn.getAttribute('data-remove-item'));
+      if(draft.items.length>1){ draft.items.splice(idx,1); render(); wireEditorEvents(); }
+    });
+
+    var addClientLink = document.getElementById('add-client-inline');
+    if(addClientLink) addClientLink.addEventListener('click', function(e){ e.preventDefault(); modal = {type:'client', editingId:null, returnToEditor:true}; render(); });
+
+    var saveBtn = document.getElementById('save-doc-btn');
+    if(saveBtn) saveBtn.addEventListener('click', saveDraft);
+  }
+  function updateTotalsDisplay(){
+    var t = draftTotals();
+    var sub = document.getElementById('t-subtotal'); if(sub) sub.textContent = fmtMoney(t.subtotal);
+    var vat = document.getElementById('t-vat'); if(vat) vat.textContent = fmtMoney(t.vat);
+    var tot = document.getElementById('t-total'); if(tot) tot.textContent = fmtMoney(t.total);
+  }
+
+  /* ---------- document view / print ---------- */
+  function renderDocView(){
+    var d = docs.find(function(x){ return x.id === view.params.id; });
+    if(!d) return '<div class="empty"><p>That document could not be found.</p></div>';
+    var t = docTotals(d);
+    var c = d.clientSnapshot || {};
+
+    var html = '<div class="doc-toolbar no-print">';
+    html += '<div class="actions-row">';
+    html += '<button class="btn" data-nav="documents">← Back</button>';
+    if(d.status === 'Draft') html += '<button class="btn" data-nav="newDoc" data-edit-id="'+d.id+'">Edit</button>';
+    html += '<button class="btn" data-duplicate="'+d.id+'">Duplicate</button>';
+    if(d.kind==='quote' && !d.convertedToInvoice) html += '<button class="btn" data-convert="'+d.id+'">Convert to invoice</button>';
+    html += '<button class="btn btn-primary" onclick="window.print()">Print / Save PDF</button>';
+    if(uiConfirm === 'doc-'+d.id){
+      html += ' <span class="confirm-inline">Delete this '+d.kind+'? <button class="btn btn-sm btn-danger" data-confirm-delete-doc="'+d.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+    } else {
+      html += '<button class="btn btn-ghost btn-danger" data-ask-delete-doc="'+d.id+'">Delete</button>';
+    }
+    html += '</div>';
+    html += '<div class="status-actions">' + statusButtons(d) + '</div>';
+    html += '</div>';
+
+    if(d.convertedToInvoice) html += '<div class="banner no-print">This quote was converted to invoice <strong>&nbsp;'+esc(d.convertedToInvoice)+'</strong>.</div>';
+    if(d.fromQuote) html += '<div class="banner no-print">Created from quote <strong>&nbsp;'+esc(d.fromQuote)+'</strong>.</div>';
+
+    html += '<div class="sheet-wrap"><div class="sheet">';
+    html += '<div class="sheet-head">';
+    html += '<div><div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
+    if(business.address) html += '<div class="sheet-meta-line">'+esc(business.address).replace(/\n/g,'<br>')+'</div>';
+    if(business.email) html += '<div class="sheet-meta-line">'+esc(business.email)+(business.phone?' · '+esc(business.phone):'')+'</div>';
+    if(business.regNumber) html += '<div class="sheet-meta-line">Reg / VAT: '+esc(business.regNumber)+'</div>';
+    html += '</div>';
+    html += '<div class="sheet-doctitle"><div class="kind">'+(d.kind==='invoice'?'INVOICE':'QUOTE')+'</div><div class="num">'+esc(d.number)+'</div>' +
+      '<div class="sheet-dates" style="margin-top:8px;">Issued '+fmtDate(d.dateIssued)+'<br>'+(d.kind==='invoice'?'Due ':'Valid until ')+fmtDate(d.dateDue)+'</div></div>';
+    html += '</div>';
+
+    html += '<div class="sheet-parties"><div class="block"><div class="label">Billed to</div>' +
+      '<strong>'+esc(c.name||'—')+'</strong><br>' +
+      (c.company? esc(c.company)+'<br>' : '') +
+      (c.address? esc(c.address).replace(/\n/g,'<br>')+'<br>' : '') +
+      (c.email? esc(c.email)+'<br>':'') +
+      (c.phone? esc(c.phone):'') +
+      '</div></div>';
+
+    html += '<div class="table-wrap"><table><thead><tr><th>Description</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Unit price</th><th style="text-align:right;">Amount</th></tr></thead><tbody>';
+    (d.items||[]).forEach(function(it){
+      html += '<tr><td>'+esc(it.description)+'</td><td class="num-cell">'+it.qty+'</td><td class="num-cell">'+fmtMoney(it.unitPrice)+'</td><td class="num-cell">'+fmtMoney((Number(it.qty)||0)*(Number(it.unitPrice)||0))+'</td></tr>';
+    });
+    html += '</tbody></table></div>';
+
+    html += '<div class="totals" style="margin-top:16px;">' +
+      '<div class="totals-row"><span>Subtotal</span><span class="mono">'+fmtMoney(t.subtotal)+'</span></div>' +
+      (d.vatEnabled? '<div class="totals-row"><span>VAT (15%)</span><span class="mono">'+fmtMoney(t.vat)+'</span></div>' : '') +
+      '<div class="totals-row total"><span>Total</span><span class="mono">'+fmtMoney(t.total)+'</span></div>' +
+      '</div>';
+
+    if(d.notes) html += '<div class="sheet-notes">'+esc(d.notes)+'</div>';
+
+    if(d.kind==='invoice' && (business.bankName || business.accountNumber)){
+      html += '<div class="sheet-pay"><div class="label">Payment details</div>' +
+        (business.bankName? business.bankName+'<br>':'') +
+        (business.accountHolder? 'Account holder: '+esc(business.accountHolder)+'<br>':'') +
+        (business.accountNumber? 'Account number: '+esc(business.accountNumber)+'<br>':'') +
+        (business.branchCode? 'Branch code: '+esc(business.branchCode)+'<br>':'') +
+        (business.accountType? esc(business.accountType):'') +
+        '</div>';
+    }
+
+    html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
+    html += '</div></div>';
+    return html;
+  }
+  function statusButtons(d){
+    if(d.kind==='invoice'){
+      var opts = [['Draft','Draft'],['Sent','Mark as sent'],['Paid','Mark as paid']];
+    } else {
+      var opts = [['Draft','Draft'],['Sent','Mark as sent'],['Accepted','Mark accepted'],['Declined','Mark declined']];
+    }
+    return opts.map(function(o){
+      var active = d.status === o[0];
+      return '<button class="btn btn-sm'+(active?' btn-primary':'')+'" data-set-status="'+o[0]+'" data-doc-id="'+d.id+'"'+(active?' disabled':'')+'>'+o[1]+'</button>';
+    }).join('');
+  }
+
+  /* ---------- modal (client add/edit) ---------- */
+  function renderModal(){
+    var root = document.getElementById('modal-root');
+    if(!modal){ root.innerHTML=''; return; }
+    if(modal.type === 'client'){
+      var c = modal.editingId ? clients.find(function(x){return x.id===modal.editingId;}) : {name:'',company:'',email:'',phone:'',address:'',vatNumber:''};
+      root.innerHTML = '<div class="modal-backdrop" id="modal-backdrop"><div class="modal">' +
+        '<h2>'+(modal.editingId?'Edit client':'Add client')+'</h2>' +
+        '<form id="client-form">' +
+        field('c-name','Name', c.name, 'text') +
+        field('c-company','Company (optional)', c.company, 'text') +
+        fieldRow([field('c-email','Email', c.email, 'email'), field('c-phone','Phone', c.phone, 'text')]) +
+        field('c-address','Address', c.address, 'textarea') +
+        field('c-vat','VAT number (optional)', c.vatNumber, 'text') +
+        '<div class="actions-row" style="justify-content:flex-end; margin-top:16px;">' +
+        '<button type="button" class="btn" id="modal-cancel">Cancel</button>' +
+        '<button type="submit" class="btn btn-primary">Save client</button>' +
+        '</div></form></div></div>';
+
+      document.getElementById('modal-cancel').addEventListener('click', function(){ modal=null; render(); });
+      document.getElementById('modal-backdrop').addEventListener('click', function(e){ if(e.target.id==='modal-backdrop'){ modal=null; render(); } });
+      document.getElementById('client-form').addEventListener('submit', function(e){
+        e.preventDefault();
+        var fd = new FormData(e.target);
+        var data = { name: fd.get('c-name')||'', company: fd.get('c-company')||'', email: fd.get('c-email')||'', phone: fd.get('c-phone')||'', address: fd.get('c-address')||'', vatNumber: fd.get('c-vat')||'' };
+        if(!data.name.trim()){ return; }
+        var wasReturnToEditor = modal.returnToEditor;
+        var editingId = modal.editingId;
+        var newId = saveClient(data, editingId);
+        modal = null;
+        if(wasReturnToEditor && draft){
+          draft.clientId = editingId || newId;
+        }
+        render();
+      });
+    }
+  }
+
+  /* ============================================================
+     GLOBAL EVENT DELEGATION
+     ============================================================ */
+  document.addEventListener('click', function(e){
+    if(e.target.closest('[data-sign-out]')){ e.preventDefault(); signOutNow(); return; }
+    var authModeLink = e.target.closest('[data-auth-mode]');
+    if(authModeLink){ e.preventDefault(); authMode = authModeLink.getAttribute('data-auth-mode'); authError=''; render(); return; }
+
+    var navEl = e.target.closest('[data-nav]');
+    if(navEl){
+      var name = navEl.getAttribute('data-nav');
+      var params = {};
+      if(navEl.hasAttribute('data-kind')) params.kind = navEl.getAttribute('data-kind');
+      if(navEl.hasAttribute('data-id')) params.id = navEl.getAttribute('data-id');
+      if(navEl.hasAttribute('data-edit-id')) params.editId = navEl.getAttribute('data-edit-id');
+      go(name, params);
+      return;
+    }
+    var modalBtn = e.target.closest('[data-modal]');
+    if(modalBtn){ modal = {type: modalBtn.getAttribute('data-modal'), editingId:null}; render(); return; }
+
+    var editClientBtn = e.target.closest('[data-edit-client]');
+    if(editClientBtn){ modal = {type:'client', editingId: editClientBtn.getAttribute('data-edit-client')}; render(); return; }
+
+    var askDelClient = e.target.closest('[data-ask-delete-client]');
+    if(askDelClient){ uiConfirm = 'client-' + askDelClient.getAttribute('data-ask-delete-client'); render(); return; }
+    var confirmDelClient = e.target.closest('[data-confirm-delete-client]');
+    if(confirmDelClient){ deleteClient(confirmDelClient.getAttribute('data-confirm-delete-client')); uiConfirm=null; render(); return; }
+
+    var askDelDoc = e.target.closest('[data-ask-delete-doc]');
+    if(askDelDoc){ uiConfirm = 'doc-' + askDelDoc.getAttribute('data-ask-delete-doc'); render(); return; }
+    var confirmDelDoc = e.target.closest('[data-confirm-delete-doc]');
+    if(confirmDelDoc){ deleteDoc(confirmDelDoc.getAttribute('data-confirm-delete-doc')); return; }
+
+    var cancelConfirm = e.target.closest('[data-cancel-confirm]');
+    if(cancelConfirm){ uiConfirm=null; render(); return; }
+
+    var filterDoc = e.target.closest('[data-filter-doc]');
+    if(filterDoc){ docFilter = filterDoc.getAttribute('data-filter-doc'); render(); return; }
+
+    var setStatusBtn = e.target.closest('[data-set-status]');
+    if(setStatusBtn){ setStatus(setStatusBtn.getAttribute('data-doc-id'), setStatusBtn.getAttribute('data-set-status')); return; }
+
+    var dupBtn = e.target.closest('[data-duplicate]');
+    if(dupBtn){ var d = docs.find(function(x){return x.id===dupBtn.getAttribute('data-duplicate');}); if(d) duplicateDoc(d); return; }
+
+    var convBtn = e.target.closest('[data-convert]');
+    if(convBtn){ var q = docs.find(function(x){return x.id===convBtn.getAttribute('data-convert');}); if(q) convertToInvoice(q); return; }
+  });
+
+  document.addEventListener('submit', function(e){
+    if(e.target.id === 'auth-form'){
+      e.preventDefault();
+      var afd = new FormData(e.target);
+      var email = String(afd.get('auth-email')||'').trim();
+      var password = String(afd.get('auth-password')||'');
+      authEmailValue = email;
+      if(!email || !password){ authError = 'Enter your email and password.'; render(); return; }
+      if(authMode === 'signup') signUp(email, password); else signIn(email, password);
+      return;
+    }
+    if(e.target.id === 'business-form'){
+      e.preventDefault();
+      var fd = new FormData(e.target);
+      var data = {};
+      ['legalName','regNumber','email','phone','address','bankName','accountHolder','accountNumber','branchCode','accountType'].forEach(function(k){
+        data[k] = fd.get(k) || '';
+      });
+      saveBusiness(data);
+      alertBanner('Settings saved.');
+    }
+  });
+
+  /* ---------------- boot ---------------- */
+  render();
+})();
+</script>
