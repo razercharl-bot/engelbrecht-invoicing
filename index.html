@@ -322,9 +322,11 @@
   var business = defaultBusiness();
   var clients = [];
   var docs = [];
+  var reports = [];         // saved monthly client reports
   var counters = { invoice: 1, quote: 1 };
   var view = { name: 'dashboard', params: {} };
   var draft = null;         // document editor working copy
+  var reportDraft = null;   // report builder working copy
   var uiConfirm = null;     // id of row showing inline delete-confirm
   var modal = null;         // {type:'client', editingId:null} etc
   var pdfBusy = null;       // id of document currently being turned into a PDF
@@ -449,6 +451,10 @@
       docs.sort(function(a,b){ return (b.createdAt||'').localeCompare(a.createdAt||''); });
       render();
     }));
+    unsubscribers.push(dbNS.collection('reports').onSnapshot(function(qs){
+      reports = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      render();
+    }));
     unsubscribers.push(dbNS.doc('counters/invoice').onSnapshot(function(snap){
       counters.invoice = snap.exists ? (snap.data().next || 1) : 1;
     }));
@@ -460,7 +466,7 @@
     unsubscribers.forEach(function(u){ try{ u(); }catch(e){} });
     unsubscribers = [];
     dbNS = null;
-    business = defaultBusiness(); clients = []; docs = []; counters = {invoice:1, quote:1};
+    business = defaultBusiness(); clients = []; docs = []; reports = []; counters = {invoice:1, quote:1};
   }
 
   function friendlyAuthError(err){
@@ -516,6 +522,14 @@
     uiConfirm = null;
     if(name === 'newDoc'){
       draft = params && params.editId ? loadDraftFrom(docs.find(function(d){ return d.id === params.editId; })) : blankDraft(params && params.kind || 'invoice');
+    }
+    if(name === 'reportBuilder'){
+      if(params && params.editId){
+        reportDraft = loadReportDraftFrom(reports.find(function(r){ return r.id === params.editId; }));
+      } else {
+        reportDraft = blankReportDraft();
+        if(params && params.clientId) reportDraft.clientId = params.clientId;
+      }
     }
     window.scrollTo(0,0);
     render();
@@ -646,6 +660,7 @@
     {name:'dashboard', label:'Dashboard'},
     {name:'documents', label:'Documents'},
     {name:'clients', label:'Clients'},
+    {name:'reports', label:'Reports'},
     {name:'settings', label:'Settings'}
   ];
 
@@ -662,6 +677,8 @@
     switch(view.name){
       case 'documents': html += renderDocuments(); break;
       case 'clients': html += renderClients(); break;
+      case 'reports': html += renderReports(); break;
+      case 'reportBuilder': html += renderReportBuilder(); break;
       case 'settings': html += renderSettings(); break;
       case 'newDoc': html += renderEditor(); break;
       case 'viewDoc': html += renderDocView(); break;
@@ -670,12 +687,13 @@
     el.innerHTML = html;
     renderModal();
     if(view.name === 'newDoc') wireEditorEvents();
+    if(view.name === 'reportBuilder') wireReportBuilderEvents();
   }
 
   function renderTabs(){
     var t = document.getElementById('tabs');
     t.innerHTML = TABS.map(function(tb){
-      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents');
+      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents') || (view.name==='reportBuilder' && tb.name==='reports');
       return '<button class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '">' + tb.label + '</button>';
     }).join('');
 
@@ -1127,6 +1145,468 @@
     });
   }
 
+  /* ---------- reports ---------- */
+  function monthLabel(key){
+    if(!key) return '';
+    var parts = key.split('-');
+    if(parts.length !== 2) return key;
+    var d = new Date(Number(parts[0]), Number(parts[1])-1, 1);
+    if(isNaN(d)) return key;
+    return d.toLocaleDateString('en-ZA', {month:'long', year:'numeric'});
+  }
+  function blankGbp(){ return { totalCur:'', totalPrev:'', viewsCur:'', viewsPrev:'', callsCur:'', callsPrev:'', dirCur:'', dirPrev:'', clicksCur:'', clicksPrev:'' }; }
+  function blankWeb(){ return { visitorsCur:'', visitorsPrev:'' }; }
+  function blankSummit(){ return { show:true, stage:2, reason:'', note:'' }; }
+  function blankReportDraft(){
+    return {
+      id: null,
+      clientId: '',
+      periodKey: '',
+      prevPeriodKey: '',
+      companyName: business.legalName || '',
+      gbp: blankGbp(),
+      web: blankWeb(),
+      queries: [ {text:'',clicks:'',impr:''}, {text:'',clicks:'',impr:''}, {text:'',clicks:'',impr:''} ],
+      content: [ {title:'',pv:'',sess:'',eng:'',dur:''}, {title:'',pv:'',sess:'',eng:'',dur:''}, {title:'',pv:'',sess:'',eng:'',dur:''} ],
+      summit: blankSummit()
+    };
+  }
+  function loadReportDraftFrom(r){
+    if(!r) return blankReportDraft();
+    var copy = JSON.parse(JSON.stringify(r));
+    copy.gbp = Object.assign(blankGbp(), copy.gbp||{});
+    copy.web = Object.assign(blankWeb(), copy.web||{});
+    if(!copy.queries || !copy.queries.length) copy.queries = [{text:'',clicks:'',impr:''}];
+    if(!copy.content || !copy.content.length) copy.content = [{title:'',pv:'',sess:'',eng:'',dur:''}];
+    copy.summit = Object.assign(blankSummit(), copy.summit||{});
+    return copy;
+  }
+  function findPreviousReport(clientId, periodKey){
+    if(!clientId || !periodKey) return null;
+    var candidates = reports.filter(function(r){
+      return r.clientId === clientId && r.periodKey && r.periodKey < periodKey && (!reportDraft || r.id !== reportDraft.id);
+    });
+    if(!candidates.length) return null;
+    candidates.sort(function(a,b){ return b.periodKey.localeCompare(a.periodKey); });
+    return candidates[0];
+  }
+  function applyPreviousReportAutofill(){
+    if(!reportDraft.clientId || !reportDraft.periodKey) return;
+    var prev = findPreviousReport(reportDraft.clientId, reportDraft.periodKey);
+    if(prev){
+      reportDraft.prevPeriodKey = prev.periodKey;
+      reportDraft.gbp.totalPrev = (prev.gbp||{}).totalCur || '';
+      reportDraft.gbp.viewsPrev = (prev.gbp||{}).viewsCur || '';
+      reportDraft.gbp.callsPrev = (prev.gbp||{}).callsCur || '';
+      reportDraft.gbp.dirPrev = (prev.gbp||{}).dirCur || '';
+      reportDraft.gbp.clicksPrev = (prev.gbp||{}).clicksCur || '';
+      reportDraft.web.visitorsPrev = (prev.web||{}).visitorsCur || '';
+      alertBanner("Filled in last period's figures from " + monthLabel(prev.periodKey) + '.');
+    }
+  }
+
+  function saveReport(){
+    if(!dbNS) return;
+    if(!reportDraft.clientId){ alertBanner('Choose a client before saving.'); return; }
+    if(!reportDraft.periodKey){ alertBanner('Choose a reporting period before saving.'); return; }
+    var client = clients.find(function(c){ return c.id === reportDraft.clientId; });
+    var nowIso = new Date().toISOString();
+    var toSave = {
+      clientId: reportDraft.clientId,
+      clientName: client ? (client.company ? client.name + ' · ' + client.company : client.name) : (reportDraft.clientName || ''),
+      periodKey: reportDraft.periodKey,
+      periodLabel: monthLabel(reportDraft.periodKey),
+      prevPeriodKey: reportDraft.prevPeriodKey || '',
+      prevPeriodLabel: monthLabel(reportDraft.prevPeriodKey),
+      companyName: reportDraft.companyName || business.legalName || '',
+      gbp: reportDraft.gbp,
+      web: reportDraft.web,
+      queries: reportDraft.queries,
+      content: reportDraft.content,
+      summit: reportDraft.summit,
+      createdAt: reportDraft.createdAt || nowIso,
+      updatedAt: nowIso
+    };
+    if(!reportDraft.id){
+      dbNS.collection('reports').add(toSave).then(function(ref){
+        reportDraft.id = ref.id;
+        reportDraft.createdAt = toSave.createdAt;
+        alertBanner('Report saved.');
+      });
+    } else {
+      dbNS.doc('reports/' + reportDraft.id).set(toSave).then(function(){
+        alertBanner('Report saved.');
+      });
+    }
+  }
+  function deleteReport(id){
+    if(!dbNS) return;
+    dbNS.doc('reports/' + id).delete();
+    if(view.name === 'reportBuilder' && reportDraft && reportDraft.id === id) go('reports');
+  }
+
+  var RPT_CSS = "\n    :root {\n      --bp-primary: #3D1D63; --bp-primary-dark: #2A1245; --bp-accent: #5B2C91; --bp-gold: #D99B3F;\n      --bp-white: #FFFFFF; --bp-bg: #F7F5FA; --bp-card: #FFFFFF; --bp-text: #241934; --bp-muted: #6E6079;\n      --bp-border: #E4DCEE; --bp-down: #C1502E; --bp-up: #2E9E6B;\n    }\n    * { box-sizing: border-box; }\n    body { margin:0; background:var(--bp-bg); color:var(--bp-text); font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,Arial,sans-serif; line-height:1.5; }\n    .wrap { max-width:1080px; margin:0 auto; }\n    .hero { background:linear-gradient(155deg, var(--bp-primary-dark) 0%, var(--bp-accent) 100%); color:var(--bp-white); padding:40px 48px 56px; position:relative; overflow:hidden; }\n    .hero::before { content:\"\"; position:absolute; right:-60px; bottom:-90px; width:0; height:0; border-left:220px solid transparent; border-right:220px solid transparent; border-bottom:260px solid rgba(217,155,63,0.08); }\n    .hero::after { content:\"\"; position:absolute; right:40px; bottom:-90px; width:0; height:0; border-left:130px solid transparent; border-right:130px solid transparent; border-bottom:170px solid rgba(217,155,63,0.14); }\n    .hero-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:36px; position:relative; z-index:2; }\n    .hero-brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:15px; letter-spacing:.3px; }\n    .hero-eyebrow { text-transform:uppercase; letter-spacing:2px; font-size:11px; font-weight:600; color:var(--bp-gold); background:rgba(217,155,63,0.14); padding:6px 12px; border-radius:20px; border:1px solid rgba(217,155,63,0.35); }\n    .hero h1 { font-size:34px; margin:0 0 8px; font-weight:700; position:relative; z-index:2; max-width:640px; }\n    .hero h1 span { color:var(--bp-gold); }\n    .hero p.period { color:rgba(255,255,255,0.72); font-size:15px; margin:0; position:relative; z-index:2; }\n    .hero-kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-top:32px; position:relative; z-index:2; }\n    .hero-kpi { background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.16); border-radius:10px; padding:16px 18px; }\n    .hero-kpi .label { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:rgba(255,255,255,0.6); margin-bottom:6px; }\n    .hero-kpi .value { font-size:24px; font-weight:700; }\n    .hero-kpi .delta { font-size:12px; font-weight:600; margin-top:4px; }\n    .up { color:#7FE0B6; } .down { color:#FF9776; }\n    .section { padding:40px 48px; }\n    .section-title { font-size:20px; font-weight:700; margin:0 0 4px; }\n    .section-sub { color:var(--bp-muted); font-size:13.5px; margin:0 0 24px; }\n    .summit-card { background:var(--bp-card); border:1px solid var(--bp-border); border-radius:14px; padding:32px 32px 24px; }\n    .summit-track { display:flex; align-items:flex-end; justify-content:space-between; gap:6px; height:130px; position:relative; margin-bottom:18px; }\n    .s-stage { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; position:relative; }\n    .s-peak { width:100%; max-width:84px; background:var(--bp-bg); border:2px solid var(--bp-border); border-bottom:none; clip-path:polygon(50% 0%, 100% 100%, 0% 100%); }\n    .s-stage:nth-child(1) .s-peak { height:34px; } .s-stage:nth-child(2) .s-peak { height:54px; } .s-stage:nth-child(3) .s-peak { height:74px; }\n    .s-stage:nth-child(4) .s-peak { height:96px; } .s-stage:nth-child(5) .s-peak { height:118px; }\n    .s-stage.done .s-peak { background:#EFE7F7; border-color:var(--bp-accent); }\n    .s-stage.current .s-peak { background:var(--bp-accent); border-color:var(--bp-primary-dark); box-shadow:0 0 0 5px rgba(91,44,145,0.12); }\n    .s-flag { position:absolute; top:-22px; font-size:16px; }\n    .s-stage:not(.current) .s-flag { display:none; }\n    .s-name { font-size:12.5px; font-weight:700; color:var(--bp-text); margin-top:12px; text-align:center; }\n    .s-desc { font-size:11px; color:var(--bp-muted); margin-top:3px; text-align:center; padding:0 4px; }\n    .s-stage.current .s-name { color:var(--bp-accent); }\n    .summit-note { margin-top:20px; background:var(--bp-bg); border-left:3px solid var(--bp-gold); padding:14px 18px; border-radius:0 8px 8px 0; font-size:13.5px; color:var(--bp-text); }\n    .summit-note b { color:var(--bp-primary-dark); }\n    .panel-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }\n    .panel-grid.cols-2 { grid-template-columns:repeat(2,1fr); }\n    .panel { background:var(--bp-card); border:1px solid var(--bp-border); border-radius:12px; padding:18px 20px; }\n    .p-label { font-size:12px; color:var(--bp-muted); margin-bottom:8px; }\n    .p-value { font-size:26px; font-weight:700; color:var(--bp-primary-dark); }\n    .p-delta { font-size:12.5px; font-weight:600; margin-top:6px; }\n    .p-context { font-size:11.5px; color:var(--bp-muted); margin-top:6px; }\n    .card { background:var(--bp-card); border:1px solid var(--bp-border); border-radius:12px; padding:22px 24px; margin-bottom:18px; }\n    .card-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }\n    .card-head h3 { margin:0; font-size:15px; font-weight:700; }\n    .tag { font-size:11px; font-weight:600; color:var(--bp-accent); background:#EFE7F7; padding:4px 10px; border-radius:20px; }\n    table { width:100%; border-collapse:collapse; font-size:13px; }\n    th { text-align:left; color:var(--bp-muted); font-size:11.5px; text-transform:uppercase; letter-spacing:.3px; padding:8px 6px; border-bottom:1px solid var(--bp-border); }\n    td { padding:9px 6px; border-bottom:1px solid var(--bp-border); }\n    th.num, td.num { text-align:right; }\n    .footer { display:flex; justify-content:space-between; padding:24px 48px 40px; font-size:11.5px; color:var(--bp-muted); }\n    @media (max-width:720px) {\n      .hero, .section { padding-left:20px; padding-right:20px; }\n      .hero-kpis, .panel-grid { grid-template-columns:1fr; }\n    }\n  ";
+
+  function rptNum(s){ var n = parseFloat((s||'').toString().replace(/[^0-9.\-]/g,'')); return isNaN(n) ? null : n; }
+  function rptPctChange(cur, prev){
+    var c = rptNum(cur), p = rptNum(prev);
+    if(c === null || p === null || p === 0) return null;
+    return ((c - p) / p) * 100;
+  }
+  function rptDeltaHtml(cur, prev, prevLabel){
+    var pct = rptPctChange(cur, prev);
+    if(pct === null) return { cls:'up', text:'' };
+    var cls = pct >= 0 ? 'up' : 'down';
+    var arrow = pct >= 0 ? '▲' : '▼';
+    return { cls: cls, text: arrow + ' ' + Math.abs(pct).toFixed(1) + '% vs. last period (' + esc(prevLabel) + ')' };
+  }
+  function rptDeltaHtmlPlain(cur, prev){
+    var pct = rptPctChange(cur, prev);
+    if(pct === null) return { cls:'up', text:'' };
+    var cls = pct >= 0 ? 'up' : 'down';
+    var arrow = pct >= 0 ? '▲' : '▼';
+    return { cls: cls, text: arrow + ' ' + Math.abs(pct).toFixed(1) + '% (' + esc(prev) + ' → ' + esc(cur) + ')' };
+  }
+
+  function buildReportHtml(model, clientName){
+    var companyName = model.companyName || business.legalName || '[[Your Company]]';
+    clientName = clientName || '[[Client Name]]';
+    var periodCur = monthLabel(model.periodKey) || '[[This period]]';
+    var periodPrev = monthLabel(model.prevPeriodKey) || '';
+    var g = model.gbp || blankGbp(), w = model.web || blankWeb();
+
+    var heroDefs = [
+      { label:'Total Interactions', cur:g.totalCur, prev:g.totalPrev },
+      { label:'Website Visitors (28d)', cur:w.visitorsCur, prev:w.visitorsPrev },
+      { label:'Profile Views (Search)', cur:g.viewsCur, prev:g.viewsPrev },
+      { label:'Calls', cur:g.callsCur, prev:g.callsPrev }
+    ];
+    var heroKpiHtml = heroDefs.map(function(k){
+      var d = rptDeltaHtml(k.cur, k.prev, periodPrev);
+      return '<div class="hero-kpi"><div class="label">'+esc(k.label)+'</div><div class="value">'+esc(k.cur)+'</div><div class="delta '+d.cls+'">'+d.text+'</div></div>';
+    }).join('');
+
+    var showSummit = !!(model.summit && model.summit.show);
+    var summitSection = '';
+    if(showSummit){
+      var stageNames = ['Foundation','Visibility','Engagement &amp; Lead Growth','Conversion Optimisation','Market Authority'];
+      var stageDescs = ['Site live, tracking connected','Branded search &amp; local presence set','','Tightening the funnel before scaling further','Market-leading local presence'];
+      var curStage = Number(model.summit.stage) || 0;
+      var summitHtml = stageNames.map(function(name, i){
+        var cls = '';
+        if(i < curStage) cls = 'done';
+        if(i === curStage) cls = 'current';
+        var desc = i === curStage ? esc(model.summit.reason) : stageDescs[i];
+        var flag = i === curStage ? '<div class="s-flag">🚩</div>' : '';
+        return '<div class="s-stage '+cls+'">'+flag+'<div class="s-peak"></div><div class="s-name">'+name+'</div><div class="s-desc">'+desc+'</div></div>';
+      }).join('');
+      summitSection = '<div class="section"><div class="section-title">Growth Summit Tracker</div>'+
+        '<p class="section-sub">Where '+esc(clientName)+' sits on the climb from foundation to market authority.</p>'+
+        '<div class="summit-card"><div class="summit-track">'+summitHtml+'</div>'+
+        '<div class="summit-note"><b>Current stage: '+stageNames[curStage].replace('&amp;','&')+'.</b> '+esc(model.summit.note)+'</div></div></div>';
+    }
+
+    var gbpPanels = [
+      { label:'Total Interactions', cur:g.totalCur, prev:g.totalPrev },
+      { label:'Profile Views (Search)', cur:g.viewsCur, prev:g.viewsPrev },
+      { label:'Calls', cur:g.callsCur, prev:g.callsPrev },
+      { label:'Direction Requests', cur:g.dirCur, prev:g.dirPrev },
+      { label:'Website Button Clicks', cur:g.clicksCur, prev:g.clicksPrev }
+    ].map(function(p){
+      var d = rptDeltaHtmlPlain(p.cur, p.prev);
+      return '<div class="panel"><div class="p-label">'+esc(p.label)+'</div><div class="p-value">'+esc(p.cur)+'</div><div class="p-delta '+d.cls+'">'+d.text+'</div></div>';
+    }).join('');
+
+    var webDelta = rptDeltaHtmlPlain(w.visitorsCur, w.visitorsPrev);
+    var webPanel = '<div class="panel"><div class="p-label">Total Visitors (past 28 days)</div><div class="p-value">'+esc(w.visitorsCur)+'</div><div class="p-delta '+webDelta.cls+'">'+webDelta.text+'</div></div>';
+
+    var queryRowsArr = (model.queries||[]).filter(function(q){ return (q.text||'').trim(); });
+    var queryRows = queryRowsArr.map(function(q){
+      return '<tr><td>'+esc(q.text)+'</td><td class="num">'+esc(q.clicks)+'</td><td class="num">'+esc(q.impr)+'</td></tr>';
+    }).join('');
+    var queriesCard = queryRows ? '<div class="card"><div class="card-head"><h3>Top Search Queries</h3><span class="tag">'+esc(periodCur)+'</span></div>'+
+      '<table><tr><th>Query</th><th class="num">Clicks</th><th class="num">Impressions</th></tr>'+queryRows+'</table></div>' : '';
+
+    var contentRowsArr = (model.content||[]).filter(function(c){ return (c.title||'').trim(); });
+    var contentRows = contentRowsArr.map(function(c){
+      return '<tr><td>'+esc(c.title)+'</td><td class="num">'+esc(c.pv)+'</td><td class="num">'+esc(c.sess)+'</td><td class="num">'+esc(c.eng)+'</td><td class="num">'+esc(c.dur)+'</td></tr>';
+    }).join('');
+    var contentCard = contentRows ? '<div class="card"><div class="card-head"><h3>Top Content</h3><span class="tag">Last 28 Days</span></div>'+
+      '<table><tr><th>Title</th><th class="num">Pageviews</th><th class="num">Sessions</th><th class="num">Engagement Rate</th><th class="num">Avg. Duration</th></tr>'+contentRows+'</table></div>' : '';
+
+    var searchContentSection = (queriesCard || contentCard) ? '<div class="section" style="padding-top:0;">'+
+      '<div class="section-title">Search &amp; Content Performance</div><p class="section-sub">Top queries and top pages, '+esc(periodCur)+'.</p>'+queriesCard+contentCard+'</div>' : '';
+
+    return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'+
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">'+
+      '<title>'+esc(companyName)+' — '+esc(clientName)+' Performance Report</title>'+
+      '<style>'+RPT_CSS+'</style></head><body><div class="wrap">'+
+      '<div class="hero"><div class="hero-top"><div class="hero-brand">'+esc(companyName)+'</div>'+
+      '<span class="hero-eyebrow">Client Performance Report</span></div>'+
+      '<h1>'+esc(clientName)+' <span>— Monthly Performance Report</span></h1>'+
+      '<p class="period">Reporting Period: '+esc(periodCur)+(periodPrev ? ' vs. '+esc(periodPrev) : '')+'</p>'+
+      '<div class="hero-kpis">'+heroKpiHtml+'</div></div>'+
+      summitSection+
+      '<div class="section" style="'+(showSummit?'padding-top:0;':'')+'"><div class="section-title">Google Business Profile</div>'+
+      '<p class="section-sub">'+esc(periodCur)+(periodPrev?' vs. '+esc(periodPrev):'')+'.</p><div class="panel-grid">'+gbpPanels+'</div></div>'+
+      '<div class="section" style="padding-top:0;"><div class="section-title">Website Traffic</div>'+
+      '<p class="section-sub">'+esc(periodCur)+(periodPrev?' vs. '+esc(periodPrev):'')+'.</p><div class="panel-grid cols-2">'+webPanel+'</div></div>'+
+      searchContentSection+
+      '<div class="footer"><span>Report prepared by '+esc(companyName)+'.</span>'+
+      '<span>'+esc(clientName)+' · '+esc(periodCur)+(periodPrev?' vs. '+esc(periodPrev):'')+'</span></div>'+
+      '</div></body></html>';
+  }
+
+  function downloadReportHtml(){
+    var client = clients.find(function(c){ return c.id === reportDraft.clientId; });
+    var clientName = client ? (client.company ? client.name + ' · ' + client.company : client.name) : (reportDraft.clientName || 'client');
+    var html = buildReportHtml(reportDraft, clientName);
+    var blob = new Blob([html], { type: 'text/html' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = (clientName||'client').toLowerCase().replace(/[^a-z0-9]+/g,'-') + '-report-' + (reportDraft.periodKey||'report') + '.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function updateReportPreview(){
+    var frame = document.getElementById('report-preview-frame');
+    if(!frame || !reportDraft) return;
+    var client = clients.find(function(c){ return c.id === reportDraft.clientId; });
+    var clientName = client ? (client.company ? client.name + ' · ' + client.company : client.name) : '[[Client Name]]';
+    frame.srcdoc = buildReportHtml(reportDraft, clientName);
+  }
+
+  /* ---------- reports list ---------- */
+  function renderReports(){
+    var html = '<div class="view-head"><div><h1>Reports</h1><div class="view-sub">Monthly client performance reports — GBP &amp; website stats</div></div>'+
+      '<div class="actions-row"><button class="btn btn-primary" data-nav="reportBuilder">+ New report</button></div></div>';
+    html += '<div class="card">';
+    if(!reports.length){
+      html += emptyState('📊','No reports yet','Build a monthly performance report for a client — next month\'s figures will be filled in for you automatically.', [
+        {label:'New report', nav:'reportBuilder', primary:true}
+      ]);
+    } else {
+      var sorted = reports.slice().sort(function(a,b){
+        return (b.periodKey||'').localeCompare(a.periodKey||'') || (b.updatedAt||'').localeCompare(a.updatedAt||'');
+      });
+      html += '<div class="table-wrap"><table><thead><tr><th>Client</th><th>Period</th><th>Updated</th><th></th></tr></thead><tbody>';
+      sorted.forEach(function(r){
+        html += '<tr>'+
+          '<td>'+esc(r.clientName||'—')+'</td>'+
+          '<td class="mono">'+esc(r.periodLabel||r.periodKey||'—')+'</td>'+
+          '<td>'+ (r.updatedAt ? fmtDate(r.updatedAt.slice(0,10)) : '—') +'</td>'+
+          '<td style="text-align:right; white-space:nowrap;">';
+        html += '<button class="btn btn-sm btn-ghost" data-nav="reportBuilder" data-edit-id="'+r.id+'">Open</button> ';
+        if(uiConfirm === 'report-' + r.id){
+          html += '<span class="confirm-inline">Delete? <button class="btn btn-sm btn-danger" data-confirm-delete-report="'+r.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+        } else {
+          html += '<button class="btn btn-sm btn-ghost btn-danger" data-ask-delete-report="'+r.id+'">Delete</button>';
+        }
+        html += '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- report builder form ---------- */
+  function statPairField(prefix, label, cur, prev){
+    return '<div style="margin-bottom:16px;">'+
+      '<label style="margin-bottom:8px;">'+esc(label)+'</label>'+
+      '<div class="field-row">'+
+      '<div class="field"><label style="font-weight:400;">This period</label><input id="'+prefix+'-cur" type="text" inputmode="decimal" value="'+esc(cur)+'"></div>'+
+      '<div class="field"><label style="font-weight:400;">Last period</label><input id="'+prefix+'-prev" type="text" inputmode="decimal" value="'+esc(prev)+'"></div>'+
+      '</div></div>';
+  }
+  function queryRowHtml(q, i){
+    return '<div class="field-row" data-idx="'+i+'" style="align-items:flex-end;">'+
+      '<div class="field"><label style="font-weight:400;">Query</label><input class="rq-text" type="text" value="'+esc(q.text)+'"></div>'+
+      '<div class="field" style="max-width:120px;"><label style="font-weight:400;">Clicks</label><input class="rq-clicks" type="text" value="'+esc(q.clicks)+'"></div>'+
+      '<div class="field" style="max-width:140px;"><label style="font-weight:400;">Impressions</label><input class="rq-impr" type="text" value="'+esc(q.impr)+'"></div>'+
+      '<div class="field" style="max-width:36px;"><label style="font-weight:400;">&nbsp;</label><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-query="'+i+'" title="Remove">✕</button></div>'+
+      '</div>';
+  }
+  function contentRowHtml(c, i){
+    return '<div data-idx="'+i+'" style="border:1px dashed var(--line-strong); border-radius:8px; padding:12px; margin-bottom:10px;">'+
+      '<div class="field-row" style="align-items:flex-end;">'+
+      '<div class="field"><label style="font-weight:400;">Page / content title</label><input class="rc-title" type="text" value="'+esc(c.title)+'"></div>'+
+      '<div class="field" style="max-width:36px;"><label style="font-weight:400;">&nbsp;</label><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-content="'+i+'" title="Remove">✕</button></div>'+
+      '</div>'+
+      '<div class="field-row">'+
+      '<div class="field"><label style="font-weight:400;">Pageviews</label><input class="rc-pv" type="text" value="'+esc(c.pv)+'"></div>'+
+      '<div class="field"><label style="font-weight:400;">Sessions</label><input class="rc-sess" type="text" value="'+esc(c.sess)+'"></div>'+
+      '<div class="field"><label style="font-weight:400;">Engagement rate</label><input class="rc-eng" type="text" value="'+esc(c.eng)+'"></div>'+
+      '<div class="field"><label style="font-weight:400;">Avg. duration</label><input class="rc-dur" type="text" value="'+esc(c.dur)+'"></div>'+
+      '</div></div>';
+  }
+  function renderReportBuilder(){
+    var d = reportDraft;
+    if(!d) return '<div class="empty"><p>Nothing to show.</p></div>';
+    var client = clients.find(function(c){ return c.id === d.clientId; });
+    var html = '<div class="view-head"><div><h1>'+(d.id?'Edit report':'New report')+'</h1>'+
+      '<div class="view-sub">'+(client? esc(client.name) : 'Choose a client below')+(d.periodKey ? ' · '+esc(monthLabel(d.periodKey)) : '')+'</div></div>'+
+      '<div class="actions-row"><button class="btn" data-nav="reports">Cancel</button>'+
+      '<button type="button" class="btn" id="download-report-btn">Download HTML</button>'+
+      '<button type="button" class="btn btn-primary" id="save-report-btn">Save report</button></div></div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Report basics</h3>';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Client</label><select id="rf-client"><option value="">Choose a client…</option>'+
+      clients.map(function(c){ return '<option value="'+c.id+'"'+(d.clientId===c.id?' selected':'')+'>'+esc(c.name)+(c.company?' — '+esc(c.company):'')+'</option>'; }).join('')+
+      '</select></div>';
+    html += '<div class="field"><label>Report company name</label><input id="rf-company" type="text" value="'+esc(d.companyName)+'"></div>';
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>This period</label><input id="rf-period" type="month" value="'+esc(d.periodKey)+'"></div>';
+    html += '<div class="field"><label>Previous period <span style="font-weight:400; color:var(--ink-faint);">— filled in automatically when available</span></label><input id="rf-prev-period" type="month" value="'+esc(d.prevPeriodKey)+'"></div>';
+    html += '</div>';
+    if(!d.id && d.clientId && d.periodKey && !d.prevPeriodKey){
+      html += '<p class="hint">No earlier report found for this client — enter last period\'s figures manually this once. From next month they\'ll be filled in for you automatically.</p>';
+    }
+    html += '<div class="switch-row"><span style="font-size:13.5px; font-weight:600;">Include the Growth Summit Tracker</span><label class="switch"><input type="checkbox" id="rf-summit-toggle" '+(d.summit.show?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>';
+    html += '</div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Google Business Profile</h3>';
+    html += statPairField('rf-gbp-total','Total Interactions', d.gbp.totalCur, d.gbp.totalPrev);
+    html += statPairField('rf-gbp-views','Profile Views (via Search)', d.gbp.viewsCur, d.gbp.viewsPrev);
+    html += statPairField('rf-gbp-calls','Calls', d.gbp.callsCur, d.gbp.callsPrev);
+    html += statPairField('rf-gbp-dir','Direction Requests', d.gbp.dirCur, d.gbp.dirPrev);
+    html += statPairField('rf-gbp-clicks','Website Button Clicks', d.gbp.clicksCur, d.gbp.clicksPrev);
+    html += '</div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Website Traffic</h3>';
+    html += statPairField('rf-web','Total Visitors (past 28 days)', d.web.visitorsCur, d.web.visitorsPrev);
+    html += '</div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Top Search Queries</h3>';
+    html += '<div id="report-query-rows">'+ d.queries.map(function(q,i){ return queryRowHtml(q,i); }).join('') +'</div>';
+    html += '<button type="button" class="btn btn-sm" id="add-query-row-btn">+ Add query</button>';
+    html += '</div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Top Content <span style="font-weight:400; color:var(--ink-faint);">— last 28 days</span></h3>';
+    html += '<div id="report-content-rows">'+ d.content.map(function(c,i){ return contentRowHtml(c,i); }).join('') +'</div>';
+    html += '<button type="button" class="btn btn-sm" id="add-content-row-btn">+ Add page</button>';
+    html += '</div>';
+
+    if(d.summit.show){
+      html += '<div class="card card-pad" style="margin-bottom:18px;">';
+      html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Growth Summit Tracker</h3>';
+      html += '<div class="field"><label>Current stage</label><select id="rf-summit-stage">'+
+        ['Foundation','Visibility','Engagement &amp; Lead Growth','Conversion Optimisation','Market Authority'].map(function(name,i){
+          return '<option value="'+i+'"'+(Number(d.summit.stage)===i?' selected':'')+'>'+name.replace('&amp;','&')+'</option>';
+        }).join('')+
+        '</select></div>';
+      html += '<div class="field"><label>One-line reason for this stage</label><input id="rf-summit-reason" type="text" value="'+esc(d.summit.reason)+'"></div>';
+      html += '<div class="field"><label>Summary note (2-3 sentences)</label><textarea id="rf-summit-note">'+esc(d.summit.note)+'</textarea></div>';
+      html += '</div>';
+    }
+
+    html += '<div class="card card-pad"><h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Live preview</h3>'+
+      '<div style="background:#EAE6F0; border-radius:10px; padding:16px;"><iframe id="report-preview-frame" style="width:100%; height:1500px; border:none; background:#fff; border-radius:8px; box-shadow:0 4px 24px rgba(42,18,69,0.12);"></iframe></div></div>';
+
+    return html;
+  }
+
+  function wireReportBuilderEvents(){
+    var clientSel = document.getElementById('rf-client');
+    if(clientSel) clientSel.addEventListener('change', function(){
+      reportDraft.clientId = this.value;
+      if(!reportDraft.id) applyPreviousReportAutofill();
+      render();
+    });
+    var companyEl = document.getElementById('rf-company');
+    if(companyEl) companyEl.addEventListener('input', function(){ reportDraft.companyName = this.value; updateReportPreview(); });
+
+    var periodEl = document.getElementById('rf-period');
+    if(periodEl) periodEl.addEventListener('change', function(){
+      reportDraft.periodKey = this.value;
+      if(!reportDraft.id) applyPreviousReportAutofill();
+      render();
+    });
+    var prevPeriodEl = document.getElementById('rf-prev-period');
+    if(prevPeriodEl) prevPeriodEl.addEventListener('change', function(){ reportDraft.prevPeriodKey = this.value; updateReportPreview(); });
+
+    var summitToggle = document.getElementById('rf-summit-toggle');
+    if(summitToggle) summitToggle.addEventListener('change', function(){ reportDraft.summit.show = this.checked; render(); });
+    var summitStage = document.getElementById('rf-summit-stage');
+    if(summitStage) summitStage.addEventListener('change', function(){ reportDraft.summit.stage = Number(this.value); updateReportPreview(); });
+    var summitReason = document.getElementById('rf-summit-reason');
+    if(summitReason) summitReason.addEventListener('input', function(){ reportDraft.summit.reason = this.value; updateReportPreview(); });
+    var summitNote = document.getElementById('rf-summit-note');
+    if(summitNote) summitNote.addEventListener('input', function(){ reportDraft.summit.note = this.value; updateReportPreview(); });
+
+    [
+      ['rf-gbp-total','gbp','totalCur','totalPrev'],
+      ['rf-gbp-views','gbp','viewsCur','viewsPrev'],
+      ['rf-gbp-calls','gbp','callsCur','callsPrev'],
+      ['rf-gbp-dir','gbp','dirCur','dirPrev'],
+      ['rf-gbp-clicks','gbp','clicksCur','clicksPrev'],
+      ['rf-web','web','visitorsCur','visitorsPrev']
+    ].forEach(function(cfg){
+      var curEl = document.getElementById(cfg[0]+'-cur');
+      var prevEl = document.getElementById(cfg[0]+'-prev');
+      if(curEl) curEl.addEventListener('input', function(){ reportDraft[cfg[1]][cfg[2]] = this.value; updateReportPreview(); });
+      if(prevEl) prevEl.addEventListener('input', function(){ reportDraft[cfg[1]][cfg[3]] = this.value; updateReportPreview(); });
+    });
+
+    var queryRows = document.getElementById('report-query-rows');
+    if(queryRows){
+      queryRows.addEventListener('input', function(e){
+        var row = e.target.closest('[data-idx]'); if(!row) return;
+        var idx = Number(row.getAttribute('data-idx'));
+        if(e.target.classList.contains('rq-text')) reportDraft.queries[idx].text = e.target.value;
+        if(e.target.classList.contains('rq-clicks')) reportDraft.queries[idx].clicks = e.target.value;
+        if(e.target.classList.contains('rq-impr')) reportDraft.queries[idx].impr = e.target.value;
+        updateReportPreview();
+      });
+      queryRows.addEventListener('click', function(e){
+        var btn = e.target.closest('[data-remove-query]'); if(!btn) return;
+        var idx = Number(btn.getAttribute('data-remove-query'));
+        if(reportDraft.queries.length > 1){ reportDraft.queries.splice(idx,1); render(); }
+      });
+    }
+    var addQueryBtn = document.getElementById('add-query-row-btn');
+    if(addQueryBtn) addQueryBtn.addEventListener('click', function(){ reportDraft.queries.push({text:'',clicks:'',impr:''}); render(); });
+
+    var contentRows = document.getElementById('report-content-rows');
+    if(contentRows){
+      contentRows.addEventListener('input', function(e){
+        var row = e.target.closest('[data-idx]'); if(!row) return;
+        var idx = Number(row.getAttribute('data-idx'));
+        if(e.target.classList.contains('rc-title')) reportDraft.content[idx].title = e.target.value;
+        if(e.target.classList.contains('rc-pv')) reportDraft.content[idx].pv = e.target.value;
+        if(e.target.classList.contains('rc-sess')) reportDraft.content[idx].sess = e.target.value;
+        if(e.target.classList.contains('rc-eng')) reportDraft.content[idx].eng = e.target.value;
+        if(e.target.classList.contains('rc-dur')) reportDraft.content[idx].dur = e.target.value;
+        updateReportPreview();
+      });
+      contentRows.addEventListener('click', function(e){
+        var btn = e.target.closest('[data-remove-content]'); if(!btn) return;
+        var idx = Number(btn.getAttribute('data-remove-content'));
+        if(reportDraft.content.length > 1){ reportDraft.content.splice(idx,1); render(); }
+      });
+    }
+    var addContentBtn = document.getElementById('add-content-row-btn');
+    if(addContentBtn) addContentBtn.addEventListener('click', function(){ reportDraft.content.push({title:'',pv:'',sess:'',eng:'',dur:''}); render(); });
+
+    var saveBtn = document.getElementById('save-report-btn');
+    if(saveBtn) saveBtn.addEventListener('click', saveReport);
+    var downloadBtn = document.getElementById('download-report-btn');
+    if(downloadBtn) downloadBtn.addEventListener('click', downloadReportHtml);
+
+    updateReportPreview();
+  }
+
   /* ---------- modal (client add/edit) ---------- */
   function renderModal(){
     var root = document.getElementById('modal-root');
@@ -1214,6 +1694,11 @@
 
     var pdfBtn = e.target.closest('[data-download-pdf]');
     if(pdfBtn){ var pd = docs.find(function(x){return x.id===pdfBtn.getAttribute('data-download-pdf');}); if(pd) downloadPdf(pd); return; }
+
+    var askDelReport = e.target.closest('[data-ask-delete-report]');
+    if(askDelReport){ uiConfirm = 'report-' + askDelReport.getAttribute('data-ask-delete-report'); render(); return; }
+    var confirmDelReport = e.target.closest('[data-confirm-delete-report]');
+    if(confirmDelReport){ deleteReport(confirmDelReport.getAttribute('data-confirm-delete-report')); return; }
   });
 
   document.addEventListener('submit', function(e){
