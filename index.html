@@ -281,7 +281,7 @@
 <div id="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <span class="brand-mark">Engelbrecht Invoicing</span>
+      <span class="brand-mark" data-nav="dashboard" style="cursor:pointer;">Charl</span>
       <span class="brand-sub" id="sync-indicator"></span>
     </div>
     <nav class="tabs" id="tabs"></nav>
@@ -330,6 +330,7 @@
   var uiConfirm = null;     // id of row showing inline delete-confirm
   var modal = null;         // {type:'client', editingId:null} etc
   var pdfBusy = null;       // id of document currently being turned into a PDF
+  var reportPdfBusy = false; // true while a report is being turned into a PDF
 
   function defaultBusiness(){
     return {
@@ -1268,7 +1269,7 @@
     return { cls: cls, text: arrow + ' ' + Math.abs(pct).toFixed(1) + '% (' + esc(prev) + ' → ' + esc(cur) + ')' };
   }
 
-  function buildReportHtml(model, clientName){
+  function buildReportBody(model, clientName){
     var companyName = model.companyName || business.legalName || '[[Your Company]]';
     clientName = clientName || '[[Client Name]]';
     var periodCur = monthLabel(model.periodKey) || '[[This period]]';
@@ -1337,10 +1338,7 @@
     var searchContentSection = (queriesCard || contentCard) ? '<div class="section" style="padding-top:0;">'+
       '<div class="section-title">Search &amp; Content Performance</div><p class="section-sub">Top queries and top pages, '+esc(periodCur)+'.</p>'+queriesCard+contentCard+'</div>' : '';
 
-    return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'+
-      '<meta name="viewport" content="width=device-width, initial-scale=1.0">'+
-      '<title>'+esc(companyName)+' — '+esc(clientName)+' Performance Report</title>'+
-      '<style>'+RPT_CSS+'</style></head><body><div class="wrap">'+
+    return '<div class="wrap">'+
       '<div class="hero"><div class="hero-top"><div class="hero-brand">'+esc(companyName)+'</div>'+
       '<span class="hero-eyebrow">Client Performance Report</span></div>'+
       '<h1>'+esc(clientName)+' <span>— Monthly Performance Report</span></h1>'+
@@ -1354,22 +1352,77 @@
       searchContentSection+
       '<div class="footer"><span>Report prepared by '+esc(companyName)+'.</span>'+
       '<span>'+esc(clientName)+' · '+esc(periodCur)+(periodPrev?' vs. '+esc(periodPrev):'')+'</span></div>'+
-      '</div></body></html>';
+      '</div>';
+  }
+
+  function buildReportHtml(model, clientName){
+    var companyName = model.companyName || business.legalName || '[[Your Company]]';
+    var displayClientName = clientName || '[[Client Name]]';
+    var body = buildReportBody(model, clientName);
+    return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'+
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">'+
+      '<title>'+esc(companyName)+' — '+esc(displayClientName)+' Performance Report</title>'+
+      '<style>'+RPT_CSS+'</style></head><body>'+body+'</body></html>';
+  }
+
+  function reportClientName(){
+    var client = clients.find(function(c){ return c.id === reportDraft.clientId; });
+    return client ? (client.company ? client.name + ' · ' + client.company : client.name) : (reportDraft.clientName || 'client');
+  }
+  function reportFileBaseName(clientName){
+    return (clientName||'client').toLowerCase().replace(/[^a-z0-9]+/g,'-') + '-report-' + (reportDraft.periodKey||'report');
   }
 
   function downloadReportHtml(){
-    var client = clients.find(function(c){ return c.id === reportDraft.clientId; });
-    var clientName = client ? (client.company ? client.name + ' · ' + client.company : client.name) : (reportDraft.clientName || 'client');
+    var clientName = reportClientName();
     var html = buildReportHtml(reportDraft, clientName);
     var blob = new Blob([html], { type: 'text/html' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = (clientName||'client').toLowerCase().replace(/[^a-z0-9]+/g,'-') + '-report-' + (reportDraft.periodKey||'report') + '.html';
+    a.download = reportFileBaseName(clientName) + '.html';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  function downloadReportPdf(){
+    if(reportPdfBusy) return;
+    if(!window.html2pdf){
+      alertBanner('Could not load the PDF tool — try Download HTML instead.');
+      return;
+    }
+    var clientName = reportClientName();
+    var bodyHtml = buildReportBody(reportDraft, clientName);
+    var container = document.createElement('div');
+    container.style.position = 'fixed';
+    container.style.left = '-10000px';
+    container.style.top = '0';
+    container.style.width = '1080px';
+    container.innerHTML = '<style>' + RPT_CSS + '</style>' + bodyHtml;
+    document.body.appendChild(container);
+
+    reportPdfBusy = true;
+    render();
+
+    var opt = {
+      margin: 0,
+      filename: reportFileBaseName(clientName) + '.pdf',
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', windowWidth: 1080 },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
+    window.html2pdf().set(opt).from(container.querySelector('.wrap')).save().then(function(){
+      document.body.removeChild(container);
+      reportPdfBusy = false;
+      render();
+    }).catch(function(){
+      document.body.removeChild(container);
+      reportPdfBusy = false;
+      alertBanner('Could not generate the PDF — try Download HTML instead.');
+      render();
+    });
   }
 
   function updateReportPreview(){
@@ -1452,6 +1505,7 @@
       '<div class="view-sub">'+(client? esc(client.name) : 'Choose a client below')+(d.periodKey ? ' · '+esc(monthLabel(d.periodKey)) : '')+'</div></div>'+
       '<div class="actions-row"><button class="btn" data-nav="reports">Cancel</button>'+
       '<button type="button" class="btn" id="download-report-btn">Download HTML</button>'+
+      '<button type="button" class="btn" id="download-report-pdf-btn"'+(reportPdfBusy?' disabled':'')+'>'+(reportPdfBusy?'Preparing PDF…':'Download PDF')+'</button>'+
       '<button type="button" class="btn btn-primary" id="save-report-btn">Save report</button></div></div>';
 
     html += '<div class="card card-pad" style="margin-bottom:18px;">';
@@ -1603,6 +1657,8 @@
     if(saveBtn) saveBtn.addEventListener('click', saveReport);
     var downloadBtn = document.getElementById('download-report-btn');
     if(downloadBtn) downloadBtn.addEventListener('click', downloadReportHtml);
+    var downloadPdfBtn = document.getElementById('download-report-pdf-btn');
+    if(downloadPdfBtn) downloadPdfBtn.addEventListener('click', downloadReportPdf);
 
     updateReportPreview();
   }
