@@ -277,6 +277,7 @@
 <script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.14.0/html2pdf.bundle.min.js"></script>
 <div id="topbar">
   <div class="topbar-inner">
     <div class="brand">
@@ -326,6 +327,7 @@
   var draft = null;         // document editor working copy
   var uiConfirm = null;     // id of row showing inline delete-confirm
   var modal = null;         // {type:'client', editingId:null} etc
+  var pdfBusy = null;       // id of document currently being turned into a PDF
 
   function defaultBusiness(){
     return {
@@ -1024,7 +1026,8 @@
     if(d.status === 'Draft') html += '<button class="btn" data-nav="newDoc" data-edit-id="'+d.id+'">Edit</button>';
     html += '<button class="btn" data-duplicate="'+d.id+'">Duplicate</button>';
     if(d.kind==='quote' && !d.convertedToInvoice) html += '<button class="btn" data-convert="'+d.id+'">Convert to invoice</button>';
-    html += '<button class="btn btn-primary" onclick="window.print()">Print / Save PDF</button>';
+    html += '<button class="btn btn-primary" data-download-pdf="'+d.id+'"' + (pdfBusy===d.id?' disabled':'') + '>' + (pdfBusy===d.id?'Preparing PDF…':'Download PDF') + '</button>';
+    html += '<button class="btn" onclick="window.print()">Print</button>';
     if(uiConfirm === 'doc-'+d.id){
       html += ' <span class="confirm-inline">Delete this '+d.kind+'? <button class="btn btn-sm btn-danger" data-confirm-delete-doc="'+d.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
     } else {
@@ -1094,6 +1097,34 @@
       var active = d.status === o[0];
       return '<button class="btn btn-sm'+(active?' btn-primary':'')+'" data-set-status="'+o[0]+'" data-doc-id="'+d.id+'"'+(active?' disabled':'')+'>'+o[1]+'</button>';
     }).join('');
+  }
+
+  function downloadPdf(d){
+    if(pdfBusy) return;
+    var el = document.querySelector('.sheet');
+    if(!el){ return; }
+    if(!window.html2pdf){
+      alertBanner('Could not load the PDF tool — printing instead.');
+      window.print();
+      return;
+    }
+    pdfBusy = d.id;
+    render();
+    var opt = {
+      margin: 0,
+      filename: (d.number || 'document') + '.pdf',
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
+    window.html2pdf().set(opt).from(el).save().then(function(){
+      pdfBusy = null;
+      render();
+    }).catch(function(){
+      pdfBusy = null;
+      alertBanner('Could not generate the PDF — try Print instead.');
+      render();
+    });
   }
 
   /* ---------- modal (client add/edit) ---------- */
@@ -1180,6 +1211,9 @@
 
     var convBtn = e.target.closest('[data-convert]');
     if(convBtn){ var q = docs.find(function(x){return x.id===convBtn.getAttribute('data-convert');}); if(q) convertToInvoice(q); return; }
+
+    var pdfBtn = e.target.closest('[data-download-pdf]');
+    if(pdfBtn){ var pd = docs.find(function(x){return x.id===pdfBtn.getAttribute('data-download-pdf');}); if(pd) downloadPdf(pd); return; }
   });
 
   document.addEventListener('submit', function(e){
