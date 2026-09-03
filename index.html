@@ -365,7 +365,6 @@
   var firestore = firebase.firestore();
 
   var currentUser = null;
-  var authMode = 'signin';   // 'signin' | 'signup'
   var authEmailValue = '';
   var authBusy = false;
   var authError = '';
@@ -465,21 +464,13 @@
   function friendlyAuthError(err){
     var map = {
       'auth/invalid-email': "That email address doesn't look right.",
-      'auth/user-not-found': 'No account with that email yet — use "Create an account" below.',
+      'auth/user-not-found': 'No account with that email.',
       'auth/wrong-password': 'Wrong password.',
       'auth/invalid-credential': 'Email or password is incorrect.',
-      'auth/email-already-in-use': 'An account already exists with that email — sign in instead.',
-      'auth/weak-password': 'Use at least 6 characters for your password.',
       'auth/too-many-requests': 'Too many attempts — wait a bit and try again.',
       'auth/network-request-failed': 'Could not reach the server — check your connection.'
     };
     return (err && map[err.code]) || (err && err.message) || 'Something went wrong. Try again.';
-  }
-  function signUp(email, password){
-    authBusy = true; authError = ''; render();
-    auth.createUserWithEmailAndPassword(email, password).catch(function(err){
-      authBusy = false; authError = friendlyAuthError(err); render();
-    });
   }
   function signIn(email, password){
     authBusy = true; authError = ''; render();
@@ -502,7 +493,6 @@
       teardownSubscriptions();
       currentUser = null;
       connectState = 'signed-out';
-      authMode = 'signin';
       render();
     }
   });
@@ -702,22 +692,18 @@
       return '<div class="empty"><div class="empty-icon">🧾</div><p>Loading…</p></div>';
     }
 
-    var isSignup = authMode === 'signup';
     var html = boxOpen;
     html += '<div class="empty-icon" style="text-align:center;">🧾</div>' +
-      '<h3 style="text-align:center;">' + (isSignup ? 'Create your account' : 'Sign in') + '</h3>' +
-      '<p style="text-align:center;">' + (isSignup ? 'One account, works on every device — phone, tablet, laptop, no file copying.' : 'Sign in to reach your clients, invoices and quotes.') + '</p>';
+      '<h3 style="text-align:center;">Sign in</h3>' +
+      '<p style="text-align:center;">Sign in to reach your clients, invoices and quotes.</p>';
     if(authError) html += '<div class="banner">⚠️ ' + esc(authError) + '</div>';
     html += '<form id="auth-form">';
     html += field('auth-email','Email', authEmailValue, 'email');
     html += field('auth-password','Password', '', 'password');
     html += '<div class="actions-row" style="justify-content:center; margin-top:6px;">' +
       '<button type="submit" class="btn btn-primary" style="width:100%; justify-content:center;"' + (authBusy?' disabled':'') + '>' +
-      (authBusy ? 'Please wait…' : (isSignup ? 'Create account' : 'Sign in')) + '</button></div>';
+      (authBusy ? 'Please wait…' : 'Sign in') + '</button></div>';
     html += '</form>';
-    html += '<p class="hint" style="text-align:center; margin-top:14px;">' +
-      (isSignup ? 'Already set up? <a href="#" data-auth-mode="signin">Sign in instead</a>' : 'First time on this app? <a href="#" data-auth-mode="signup">Create an account</a>') +
-      '</p>';
     html += boxClose;
     return html;
   }
@@ -1153,8 +1139,6 @@
      ============================================================ */
   document.addEventListener('click', function(e){
     if(e.target.closest('[data-sign-out]')){ e.preventDefault(); signOutNow(); return; }
-    var authModeLink = e.target.closest('[data-auth-mode]');
-    if(authModeLink){ e.preventDefault(); authMode = authModeLink.getAttribute('data-auth-mode'); authError=''; render(); return; }
 
     var navEl = e.target.closest('[data-nav]');
     if(navEl){
@@ -1206,7 +1190,7 @@
       var password = String(afd.get('auth-password')||'');
       authEmailValue = email;
       if(!email || !password){ authError = 'Enter your email and password.'; render(); return; }
-      if(authMode === 'signup') signUp(email, password); else signIn(email, password);
+      signIn(email, password);
       return;
     }
     if(e.target.id === 'business-form'){
