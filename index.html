@@ -139,6 +139,12 @@
   .badge-overdue, .badge-declined{ background:var(--warn-soft); color:var(--warn); }
   .badge-invoice{ background:var(--accent-soft); color:var(--accent-ink); }
   .badge-quote{ background:var(--line); color:var(--ink-soft); }
+  .badge-quoted{ background:var(--pending-soft); color:var(--pending); }
+  .badge-approved{ background:var(--good-soft); color:var(--good); }
+  .badge-printing{ background:var(--accent-soft); color:var(--accent-ink); }
+  .badge-completed{ background:var(--good-soft); color:var(--good); }
+  .badge-invoiced{ background:var(--accent-soft); color:var(--accent-ink); }
+  .badge-cancelled{ background:var(--warn-soft); color:var(--warn); }
 
   #topbar{
     position:sticky; top:0; z-index:20;
@@ -328,13 +334,14 @@
   var clients = [];
   var docs = [];
   var reports = [];         // saved monthly client reports
-  var counters = { invoice: 1, quote: 1 };
+  var counters = { invoice: 1, quote: 1, spquote: 1 };
   var view = { name: 'dashboard', params: {} };
   var draft = null;         // document editor working copy
   var reportDraft = null;   // report builder working copy
   var uiConfirm = null;     // id of row showing inline delete-confirm
   var modal = null;         // {type:'client', editingId:null} etc
   var pdfBusy = null;       // id of document currently being turned into a PDF
+  var quotePdfBusy = null;  // id of a Solid Prints quote currently being turned into a PDF
   var reportPdfBusy = false; // true while a report is being turned into a PDF
   /* ---------------- Solid Prints costing system ----------------
      Printers / Materials / Consumables databases + a central, pure costing
@@ -347,6 +354,9 @@
   var spSettings = defaultSpSettings();
   var calc = null;           // current calculator working state (lazily created)
   var calcAdvancedOpen = false; // whether the Calculator's advanced-costs <details> is expanded (persisted across re-renders)
+  var calcEditingQuoteId = null; // set while the calculator is editing an existing Draft quote, so Save updates it in place
+  var spQuotes = [];         // saved Solid Prints quotes — each doc is a full, frozen cost snapshot (see freezeQuoteFromCalc)
+  var quoteFilter = { status: '', clientId: '', printerId: '', minProfit: '', maxProfit: '', from: '', to: '' };
 
   function defaultSpSettings(){
     return {
@@ -518,6 +528,140 @@
     return computeJobCost(calc, printer, calcMaterialsById(), calcConsumablesById(), spSettings);
   }
 
+  /* ---------------- Solid Prints quotes ----------------
+     A quote is a single, self-contained Firestore doc: the calculator's
+     inputs PLUS the full computeJobCost() breakdown, copied out as plain
+     values at save time. Because computeJobCost() never holds onto a
+     reference to a printer/material/consumable record, everything it
+     returns (prices, rates, costs) is already a frozen snapshot the moment
+     it's returned — so if a filament price changes next month, every quote
+     saved before that keeps showing the price that was actually used. */
+  function freezeQuoteFromCalc(){
+    var r = calcResult();
+    var printer = printers.find(function(p){ return p.id === calc.printerId; }) || null;
+    var client = clients.find(function(c){ return c.id === calc.clientId; }) || null;
+    var chosen = r.activeSelection;
+    var usingCustom = calc.customPrice !== '' && calc.customPrice != null;
+    var defaultRow = r.markupRows.filter(function(x){ return x.pct === Number(spSettings.defaultMarkup); })[0] || r.markupRows[0];
+    return {
+      quoteDate: todayISO(), validUntil: addDays(todayISO(), 14),
+      clientId: calc.clientId || '',
+      clientSnapshot: client ? {name:client.name, company:client.company, email:client.email, phone:client.phone, address:client.address} : null,
+      notes: '',
+      jobName: (calc.jobName || '').trim() || '3D printing job',
+      calcType: calc.calcType, quantity: r.quantity, unitsPerPlate: Number(calc.unitsPerPlate)||0, plates: r.plates,
+      printTimePerPlate: Number(calc.printTimePerPlate)||0, printTimeHours: Number(calc.printTimeHours)||0, totalPrintHours: r.totalPrintHours,
+      printerId: calc.printerId || '',
+      printerSnapshot: printer ? {name:printer.name, manufacturer:printer.manufacturer, model:printer.model, powerWatts:Number(printer.powerWatts)||0, useManualHourlyCost:!!printer.useManualHourlyCost, manualHourlyCost:Number(printer.manualHourlyCost)||0, depreciationPerHour:r.depreciationPerHour, maintenancePerHour:r.maintenancePerHour, hourlyRate:r.machineHourlyRate} : null,
+      filamentLines: r.filamentLines, filamentGramsInput: JSON.parse(JSON.stringify(calc.filamentGrams || {})),
+      wasteGrams: Number(calc.wasteGrams)||0, failureAllowancePct: Number(calc.failureAllowancePct)||0,
+      totalFilamentRawG: r.totalFilamentRawG, totalFilamentCostedG: r.totalFilamentCostedG, filamentCost: r.filamentCost,
+      electricityRateSnapshot: r.electricityRate, electricityCost: r.electricityCost,
+      machineCost: r.machineCost, machineHourlyRate: r.machineHourlyRate,
+      labourEnabled: !!calc.labourEnabled, labourHours: Number(calc.labourHours)||0, labourRateSnapshot: Number(calc.labourRate)||0, labourCost: r.labourCost,
+      postProcessing: (calc.postProcessing||[]).map(function(p){ return {description:p.description||'', amount:Number(p.amount)||0}; }), postProcessingCost: r.postProcessingCost,
+      consumablesUsed: r.consumablesLines.map(function(l){ return {consumableId:l.consumableId, name:l.name, quantity:l.quantity, unitCostSnapshot:l.unitCost, cost:l.cost}; }), consumablesCost: r.consumablesCost,
+      packagingCost: r.packagingCost,
+      otherCosts: (calc.otherCosts||[]).map(function(o){ return {description:o.description||'', amount:Number(o.amount)||0}; }), otherCost: r.otherCost,
+      totalCost: r.totalCost, costPerUnit: r.costPerUnit,
+      rounding: calc.rounding, roundingCustom: Number(calc.roundingCustom)||0,
+      customPriceUsed: usingCustom, markupPctUsed: usingCustom ? null : (defaultRow ? defaultRow.pct : null),
+      sellingPricePerUnit: chosen.priceUnit, sellingPriceTotal: chosen.priceTotal,
+      discount: 0, finalPrice: chosen.priceTotal,
+      profit: chosen.profitTotal, profitMargin: chosen.marginPct, actualMarkupPct: chosen.actualMarkupPct,
+      convertedToInvoiceNumber: null
+    };
+  }
+  function nextSpQuoteNumber(){ return 'Q-' + pad4(counters.spquote); }
+  function bumpSpQuoteCounter(){
+    var n = counters.spquote + 1;
+    counters.spquote = n;
+    if(dbNS) dbNS.doc('counters/spquote').set({ next: n });
+  }
+  function saveQuoteFromCalc(){
+    if(!dbNS) return;
+    var snap = freezeQuoteFromCalc();
+    var now = new Date().toISOString();
+    if(calcEditingQuoteId){
+      var existing = spQuotes.find(function(q){ return q.id === calcEditingQuoteId; });
+      snap.status = existing ? existing.status : 'Draft';
+      snap.quoteNumber = existing ? existing.quoteNumber : nextSpQuoteNumber();
+      snap.createdAt = existing ? existing.createdAt : now;
+      snap.updatedAt = now;
+      snap.convertedToInvoiceNumber = existing ? existing.convertedToInvoiceNumber : null;
+      dbNS.doc('spQuotes/' + calcEditingQuoteId).set(snap);
+      go('spQuoteView', { id: calcEditingQuoteId });
+    } else {
+      snap.status = 'Draft';
+      snap.quoteNumber = nextSpQuoteNumber();
+      snap.createdAt = now; snap.updatedAt = now;
+      dbNS.collection('spQuotes').add(snap).then(function(ref){
+        bumpSpQuoteCounter();
+        go('spQuoteView', { id: ref.id });
+      });
+    }
+  }
+  function setSpQuoteStatus(id, status){
+    if(!dbNS) return;
+    var q = spQuotes.find(function(x){ return x.id === id; });
+    if(!q) return;
+    dbNS.doc('spQuotes/' + id).update({ status: status, updatedAt: new Date().toISOString() });
+    if(status === 'Invoiced' && !q.convertedToInvoiceNumber){
+      createInvoiceFromQuote(q);
+    }
+  }
+  function deleteSpQuote(id){ if(dbNS) dbNS.doc('spQuotes/' + id).delete(); }
+  function createInvoiceFromQuote(q){
+    if(!dbNS) return;
+    var inv = blankDraft('invoice');
+    inv.clientId = q.clientId || '';
+    inv.clientSnapshot = q.clientSnapshot;
+    inv.items = [{ description: q.jobName, qty: q.quantity, unitPrice: Math.round((Number(q.sellingPricePerUnit)||0) * 100) / 100 }];
+    inv.notes = 'From Solid Prints quote ' + q.quoteNumber + '. Payment due within 7 days of the invoice date. Thank you for your business.';
+    inv.fromQuote = q.quoteNumber;
+    inv.number = nextNumber('invoice');
+    inv.createdAt = new Date().toISOString();
+    var toSave = Object.assign({}, inv); delete toSave.id;
+    dbNS.collection('documents').add(toSave).then(function(ref){
+      bumpCounter('invoice');
+      dbNS.doc('spQuotes/' + q.id).update({ convertedToInvoiceNumber: inv.number });
+    });
+  }
+  /* Reconstruct a calculator working-state from a saved quote, for Edit / Duplicate. */
+  function loadCalcFromQuote(q){
+    var grams = q.filamentGramsInput ? JSON.parse(JSON.stringify(q.filamentGramsInput)) : {};
+    if(!q.filamentGramsInput){
+      // older quotes saved before filamentGramsInput existed: fall back to the frozen
+      // per-order grams (only exact for calcType 'single', where no plate-multiplier applied)
+      (q.filamentLines||[]).forEach(function(l){ grams[l.materialId] = l.grams; });
+    }
+    return {
+      jobName: q.jobName || '', clientId: q.clientId || '', quantity: q.quantity || 1, printerId: q.printerId || '',
+      calcType: q.calcType || 'single',
+      unitsPerPlate: q.unitsPerPlate || '', printTimePerPlate: q.printTimePerPlate || '', printTimeHours: q.printTimeHours || '',
+      filamentGrams: grams,
+      wasteGrams: q.wasteGrams || 0, failureAllowancePct: q.failureAllowancePct || 0,
+      labourEnabled: !!q.labourEnabled, labourHours: q.labourHours || '', labourRate: q.labourRateSnapshot || spSettings.defaultLabourRate,
+      postProcessing: JSON.parse(JSON.stringify(q.postProcessing||[])),
+      consumablesUsed: (q.consumablesUsed||[]).map(function(l){ return {consumableId:l.consumableId, quantity:l.quantity}; }),
+      packagingAmount: q.packagingCost || 0,
+      otherCosts: JSON.parse(JSON.stringify(q.otherCosts||[])),
+      customPrice: q.customPriceUsed ? String(q.sellingPricePerUnit) : '',
+      rounding: q.rounding || 'none', roundingCustom: q.roundingCustom || ''
+    };
+  }
+  function editQuoteInCalculator(q){
+    calc = loadCalcFromQuote(q);
+    calcEditingQuoteId = q.id;
+    go('calculator');
+  }
+  function duplicateQuoteInCalculator(q){
+    calc = loadCalcFromQuote(q);
+    calc.jobName = calc.jobName + ' (copy)';
+    calcEditingQuoteId = null;
+    go('calculator');
+  }
+
   function defaultBusiness(){
     return {
       legalName: 'Charl Engelbrecht',
@@ -627,8 +771,8 @@
     return ref.limit(1).get().then(function(qs){
       if(!qs.empty) return;
       var seedPrinters = [
-        {id:'h2c', name:'H2C', manufacturer:'Bambu Lab', model:'H2C', purchasePrice:54964.25, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWasteGrams:0, active:true},
-        {id:'p2s', name:'P2S', manufacturer:'Bambu Lab', model:'P2S', purchasePrice:21999, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWasteGrams:5, active:true}
+        {id:'h2c', name:'H2C', manufacturer:'Bambu Lab', model:'H2C', purchasePrice:54964.25, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWasteGrams:0, capacityHoursPerMonth:200, active:true},
+        {id:'p2s', name:'P2S', manufacturer:'Bambu Lab', model:'P2S', purchasePrice:21999, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWasteGrams:5, capacityHoursPerMonth:200, active:true}
       ];
       var batch = firestore.batch();
       seedPrinters.forEach(function(p){ var id=p.id; var data=Object.assign({},p); delete data.id; batch.set(firestore.doc(userPath('printers')+'/'+id), data); });
@@ -712,13 +856,23 @@
     unsubscribers.push(dbNS.doc('counters/quote').onSnapshot(function(snap){
       counters.quote = snap.exists ? (snap.data().next || 1) : 1;
     }));
+    unsubscribers.push(dbNS.doc('counters/spquote').onSnapshot(function(snap){
+      counters.spquote = snap.exists ? (snap.data().next || 1) : 1;
+    }));
+    unsubscribers.push(dbNS.collection('spQuotes').onSnapshot(function(qs){
+      spQuotes = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      spQuotes.sort(function(a,b){ return (b.createdAt||'').localeCompare(a.createdAt||''); });
+      render();
+    }));
   }
   function teardownSubscriptions(){
     unsubscribers.forEach(function(u){ try{ u(); }catch(e){} });
     unsubscribers = [];
     dbNS = null;
-    business = defaultBusiness(); clients = []; docs = []; reports = []; counters = {invoice:1, quote:1};
-    spSettings = defaultSpSettings(); calc = null; calcAdvancedOpen = false; printers = []; materials = []; consumables = [];
+    business = defaultBusiness(); clients = []; docs = []; reports = []; counters = {invoice:1, quote:1, spquote:1};
+    spSettings = defaultSpSettings(); calc = null; calcAdvancedOpen = false; calcEditingQuoteId = null; printers = []; materials = []; consumables = [];
+    spQuotes = []; quoteFilter = { status: '', clientId: '', printerId: '', minProfit: '', maxProfit: '', from: '', to: '' };
+    quotePdfBusy = null;
   }
 
   function friendlyAuthError(err){
@@ -943,6 +1097,7 @@
   var TABS = [
     {name:'dashboard', label:'Dashboard'},
     {name:'calculator', label:'Calculator'},
+    {name:'spquotes', label:'Quotes'},
     {name:'documents', label:'Documents'},
     {name:'clients', label:'Clients'},
     {name:'printers', label:'Printers'},
@@ -969,6 +1124,8 @@
       case 'materials': html += renderMaterials(); break;
       case 'consumables': html += renderConsumables(); break;
       case 'calculator': html += renderCalculator(); break;
+      case 'spquotes': html += renderSpQuotes(); break;
+      case 'spQuoteView': html += renderSpQuoteView(); break;
       case 'reports': html += renderReports(); break;
       case 'reportBuilder': html += renderReportBuilder(); break;
       case 'settings': html += renderSettings(); break;
@@ -981,12 +1138,13 @@
     if(view.name === 'newDoc') wireEditorEvents();
     if(view.name === 'reportBuilder') wireReportBuilderEvents();
     if(view.name === 'calculator') wireCalculatorEvents();
+    if(view.name === 'spquotes') wireSpQuotesEvents();
   }
 
   function renderTabs(){
     var t = document.getElementById('tabs');
     t.innerHTML = TABS.map(function(tb){
-      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents') || (view.name==='reportBuilder' && tb.name==='reports');
+      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents') || (view.name==='reportBuilder' && tb.name==='reports') || (view.name==='spQuoteView' && tb.name==='spquotes');
       return '<button class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '">' + tb.label + '</button>';
     }).join('');
 
@@ -1043,6 +1201,8 @@
       statCard('Clients', String(clients.length), '') +
       '</div>';
 
+    html += renderSpDashboardSection();
+
     html += '<div class="card"><div class="card-pad" style="padding-bottom:12px;"><h2 style="font-size:16px;">Recent documents</h2></div>';
     if(!recent.length){
       html += emptyState('📄','No documents yet','Create your first invoice or quote — it only takes a minute.', [
@@ -1066,6 +1226,55 @@
     return html;
   }
 
+  function renderSpDashboardSection(){
+    var monthKey = todayISO().slice(0,7);
+    var thisMonthQuotes = spQuotes.filter(function(q){ return (q.quoteDate||'').slice(0,7) === monthKey; });
+    var completedThisMonth = thisMonthQuotes.filter(function(q){ return q.status==='Completed' || q.status==='Invoiced' || q.status==='Paid'; });
+    var printsThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.quantity)||0); }, 0);
+    var revenueThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.sellingPriceTotal)||0); }, 0);
+    var profitThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.profit)||0); }, 0);
+
+    var activePrinters = printers.filter(function(p){ return p.active !== false; });
+    var totalCapacity = activePrinters.reduce(function(s,p){ return s + (Number(p.capacityHoursPerMonth)||0); }, 0);
+    var bookedHours = thisMonthQuotes.filter(function(q){ return q.status !== 'Cancelled'; })
+      .reduce(function(s,q){ return s + (Number(q.totalPrintHours)||0); }, 0);
+    var utilisationPct = totalCapacity > 0 ? Math.min(999, (bookedHours / totalCapacity) * 100) : 0;
+
+    var recentQuotes = spQuotes.slice(0,5);
+
+    var html = '<div class="card card-pad" style="margin-bottom:22px;">';
+    html += '<div class="view-head" style="margin-bottom:16px;"><div><h2 style="font-size:16px;">🖨️ Solid Prints — this month</h2>' +
+      '<div class="view-sub">Completed, invoiced &amp; paid quotes with a quote date in ' + monthLabel(monthKey) + '</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote</button><button class="btn" data-nav="spquotes">View all quotes</button></div></div>';
+
+    html += '<div class="grid grid-4" style="margin-bottom:18px;">' +
+      statCard('Prints completed', String(printsThisMonth), '') +
+      statCard('Revenue', fmtMoney(revenueThisMonth), 'accent') +
+      statCard('Profit', fmtMoney(profitThisMonth), profitThisMonth>=0?'':'warn') +
+      statCard('Printer utilisation', totalCapacity>0 ? utilisationPct.toFixed(0)+'%' : '—', utilisationPct>90?'warn':'') +
+      '</div>';
+
+    if(!recentQuotes.length){
+      html += emptyState('🧾','No quotes yet','Build a job in the Calculator and save it as a quote to see it here.', [
+        {label:'Open Calculator', nav:'calculator', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Quote #</th><th>Date</th><th>Customer</th><th>Job</th><th class="num-cell">Selling price</th><th>Status</th></tr></thead><tbody>';
+      recentQuotes.forEach(function(q){
+        html += '<tr class="row-link" data-nav="spQuoteView" data-id="'+q.id+'">' +
+          '<td class="mono">'+esc(q.quoteNumber)+'</td>' +
+          '<td>'+fmtDate(q.quoteDate)+'</td>' +
+          '<td>'+esc(spQuoteClientLabel(q))+'</td>' +
+          '<td>'+esc(q.jobName)+'</td>' +
+          '<td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td>' +
+          '<td>'+spQuoteStatusBadge(q.status)+'</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
   function statCard(label, value, tone){
     return '<div class="card stat"><div class="stat-label">' + label + '</div><div class="stat-value' + (tone?' '+tone:'') + '">' + value + '</div></div>';
   }
@@ -1505,11 +1714,20 @@
 
     /* ---- actions ---- */
     html += '<div class="card card-pad">';
-    html += '<div class="actions-row">' +
-      '<button type="button" class="btn btn-primary" id="calc-create-quote-btn">Create quote from this</button>' +
-      '<button type="button" class="btn" id="calc-create-invoice-btn">Create invoice from this</button>' +
-      '</div>';
-    html += '<p class="hint" style="margin-top:8px;">Uses your custom price if set, otherwise the default markup (' + esc(spSettings.defaultMarkup) + '%). Saved quotes with full cost history are coming in a future update — for now this creates a document the same way the old print calculator did.</p>';
+    if(calcEditingQuoteId){
+      html += '<div class="actions-row">' +
+        '<button type="button" class="btn btn-primary" id="calc-create-quote-btn">Save changes to quote</button>' +
+        '<button type="button" class="btn" id="calc-cancel-edit-btn">Cancel edit</button>' +
+        '<button type="button" class="btn" id="calc-create-invoice-btn">Create invoice from this</button>' +
+        '</div>';
+      html += '<p class="hint" style="margin-top:8px;">You\'re editing a saved quote — saving will update its cost snapshot in place. Its status and quote number stay the same.</p>';
+    } else {
+      html += '<div class="actions-row">' +
+        '<button type="button" class="btn btn-primary" id="calc-create-quote-btn">Save as quote</button>' +
+        '<button type="button" class="btn" id="calc-create-invoice-btn">Create invoice from this</button>' +
+        '</div>';
+      html += '<p class="hint" style="margin-top:8px;">Uses your custom price if set, otherwise the default markup (' + esc(spSettings.defaultMarkup) + '%). Saving a quote freezes today\'s costs and prices permanently — later changes to your Materials, Printers or Settings will never change a saved quote.</p>';
+    }
     html += '</div>';
 
     return html;
@@ -1723,11 +1941,225 @@
       go('newDoc', { kind: kind, prefillItem: item, clientId: calc.clientId || '' });
     }
     var quoteBtn = document.getElementById('calc-create-quote-btn');
-    if(quoteBtn) quoteBtn.addEventListener('click', function(){ startDocFromCalc('quote'); });
+    if(quoteBtn) quoteBtn.addEventListener('click', function(){
+      var res = calcResult();
+      if(res.activeSelection.priceUnit <= 0){ alertBanner('Enter at least a filament weight or print time first.'); return; }
+      saveQuoteFromCalc();
+    });
+    var cancelEditBtn = document.getElementById('calc-cancel-edit-btn');
+    if(cancelEditBtn) cancelEditBtn.addEventListener('click', function(){
+      var id = calcEditingQuoteId;
+      calcEditingQuoteId = null;
+      calc = blankCalc();
+      if(id) go('spQuoteView', {id:id}); else render();
+    });
     var invoiceBtn = document.getElementById('calc-create-invoice-btn');
     if(invoiceBtn) invoiceBtn.addEventListener('click', function(){ startDocFromCalc('invoice'); });
 
     updateCalcOutputs();
+  }
+
+  /* ---------- Solid Prints quotes ---------- */
+  var QUOTE_STATUSES = ['Draft','Quoted','Approved','Printing','Completed','Invoiced','Paid','Cancelled'];
+  function spQuoteStatusBadge(status){
+    var cls = {Draft:'badge-draft', Quoted:'badge-quoted', Approved:'badge-approved', Printing:'badge-printing',
+      Completed:'badge-completed', Invoiced:'badge-invoiced', Paid:'badge-paid', Cancelled:'badge-cancelled'}[status] || 'badge-draft';
+    return '<span class="badge ' + cls + '">' + esc(status) + '</span>';
+  }
+  function spQuoteClientLabel(q){
+    var c = q.clientSnapshot;
+    if(!c) return '—';
+    return c.company ? (c.name + ' · ' + c.company) : c.name;
+  }
+  function filteredSpQuotes(){
+    return spQuotes.filter(function(q){
+      if(quoteFilter.status && q.status !== quoteFilter.status) return false;
+      if(quoteFilter.clientId && q.clientId !== quoteFilter.clientId) return false;
+      if(quoteFilter.printerId && q.printerId !== quoteFilter.printerId) return false;
+      if(quoteFilter.from && q.quoteDate < quoteFilter.from) return false;
+      if(quoteFilter.to && q.quoteDate > quoteFilter.to) return false;
+      if(quoteFilter.minProfit !== '' && quoteFilter.minProfit != null && Number(q.profit) < Number(quoteFilter.minProfit)) return false;
+      if(quoteFilter.maxProfit !== '' && quoteFilter.maxProfit != null && Number(q.profit) > Number(quoteFilter.maxProfit)) return false;
+      return true;
+    });
+  }
+  function renderSpQuotes(){
+    var list = filteredSpQuotes();
+    var html = '<div class="view-head"><div><h1>Quotes</h1><div class="view-sub">3D print quotes with permanently frozen cost snapshots</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote (via Calculator)</button></div></div>';
+
+    html += '<div class="card card-pad" style="margin-bottom:16px;">';
+    html += '<form id="spquote-filter-form">';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Status</label><select id="qf-status"><option value="">All statuses</option>' +
+      QUOTE_STATUSES.map(function(s){ return '<option value="'+s+'"'+(quoteFilter.status===s?' selected':'')+'>'+s+'</option>'; }).join('') + '</select></div>';
+    html += '<div class="field"><label>Customer</label><select id="qf-client"><option value="">All customers</option>' +
+      clients.map(function(c){ return '<option value="'+c.id+'"'+(quoteFilter.clientId===c.id?' selected':'')+'>'+esc(c.name)+'</option>'; }).join('') + '</select></div>';
+    html += '<div class="field"><label>Printer</label><select id="qf-printer"><option value="">All printers</option>' +
+      printers.map(function(p){ return '<option value="'+p.id+'"'+(quoteFilter.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></div>';
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>From date</label><input type="date" id="qf-from" value="'+esc(quoteFilter.from)+'"></div>';
+    html += '<div class="field"><label>To date</label><input type="date" id="qf-to" value="'+esc(quoteFilter.to)+'"></div>';
+    html += '<div class="field"><label>Min profit (R)</label><input type="number" step="0.01" id="qf-min-profit" value="'+esc(quoteFilter.minProfit)+'"></div>';
+    html += '<div class="field"><label>Max profit (R)</label><input type="number" step="0.01" id="qf-max-profit" value="'+esc(quoteFilter.maxProfit)+'"></div>';
+    html += '</div>';
+    html += '<div class="actions-row"><button type="button" class="btn btn-sm" id="qf-clear-btn">Clear filters</button></div>';
+    html += '</form>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    if(!spQuotes.length){
+      html += emptyState('🧾','No quotes yet','Build a job in the Calculator, then save it as a quote — its costs are frozen for good the moment you save.', [
+        {label:'Open Calculator', nav:'calculator', primary:true}
+      ]);
+    } else if(!list.length){
+      html += emptyState('🧾','No quotes match these filters','Try clearing a filter above.', [
+        {label:'Open Calculator', nav:'calculator', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Quote #</th><th>Date</th><th>Customer</th><th>Job</th>' +
+        '<th class="num-cell">Qty</th><th class="num-cell">Cost</th><th class="num-cell">Selling price</th><th class="num-cell">Profit</th><th>Status</th></tr></thead><tbody>';
+      list.forEach(function(q){
+        html += '<tr class="row-link" data-nav="spQuoteView" data-id="'+q.id+'">' +
+          '<td class="mono">'+esc(q.quoteNumber)+'</td>' +
+          '<td>'+fmtDate(q.quoteDate)+'</td>' +
+          '<td>'+esc(spQuoteClientLabel(q))+'</td>' +
+          '<td>'+esc(q.jobName)+'</td>' +
+          '<td class="num-cell">'+q.quantity+'</td>' +
+          '<td class="num-cell">'+fmtMoney(q.totalCost)+'</td>' +
+          '<td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td>' +
+          '<td class="num-cell">'+fmtMoney(q.profit)+'</td>' +
+          '<td>'+spQuoteStatusBadge(q.status)+'</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  function wireSpQuotesEvents(){
+    var bind = function(id, key, parse){
+      var el = document.getElementById(id);
+      if(!el) return;
+      el.addEventListener('change', function(){ quoteFilter[key] = parse ? parse(this.value) : this.value; render(); });
+    };
+    bind('qf-status','status'); bind('qf-client','clientId'); bind('qf-printer','printerId');
+    bind('qf-from','from'); bind('qf-to','to'); bind('qf-min-profit','minProfit'); bind('qf-max-profit','maxProfit');
+    var clearBtn = document.getElementById('qf-clear-btn');
+    if(clearBtn) clearBtn.addEventListener('click', function(){
+      quoteFilter = { status:'', clientId:'', printerId:'', minProfit:'', maxProfit:'', from:'', to:'' };
+      render();
+    });
+  }
+
+  function renderSpQuoteView(){
+    var q = spQuotes.find(function(x){ return x.id === view.params.id; });
+    if(!q) return '<div class="empty"><p>That quote could not be found.</p></div>';
+    var c = q.clientSnapshot || {};
+
+    var html = '<div class="doc-toolbar no-print">';
+    html += '<div class="actions-row">';
+    html += '<button class="btn" data-nav="spquotes">← Back</button>';
+    html += '<button class="btn" data-edit-quote="'+q.id+'">Edit in Calculator</button>';
+    html += '<button class="btn" data-duplicate-quote="'+q.id+'">Duplicate</button>';
+    html += '<button class="btn btn-primary" data-download-quote-pdf="'+q.id+'"'+(quotePdfBusy===q.id?' disabled':'')+'>'+(quotePdfBusy===q.id?'Preparing PDF…':'Download PDF')+'</button>';
+    html += '<button class="btn" onclick="window.print()">Print</button>';
+    if(uiConfirm === 'spquote-'+q.id){
+      html += ' <span class="confirm-inline">Delete this quote? <button class="btn btn-sm btn-danger" data-confirm-delete-quote="'+q.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+    } else {
+      html += '<button class="btn btn-ghost btn-danger" data-ask-delete-quote="'+q.id+'">Delete</button>';
+    }
+    html += '</div>';
+    html += '<div class="status-actions">' + QUOTE_STATUSES.map(function(s){
+      var active = q.status === s;
+      return '<button class="btn btn-sm'+(active?' btn-primary':'')+'" data-set-quote-status="'+s+'" data-quote-id="'+q.id+'"'+(active?' disabled':'')+'>'+s+'</button>';
+    }).join('') + '</div>';
+    html += '</div>';
+
+    if(q.convertedToInvoiceNumber) html += '<div class="banner no-print">This quote was invoiced as <strong>&nbsp;'+esc(q.convertedToInvoiceNumber)+'</strong>.</div>';
+
+    var sm = statusMeta(q.status==='Cancelled' ? 'red' : (q.profitMargin >= (spSettings.minimumMarginPct||0) ? 'green' : (q.profitMargin > 0 ? 'yellow' : 'red')));
+    html += '<div class="grid grid-4" style="margin-bottom:18px;">' +
+      statCard('Total cost', fmtMoney(q.totalCost), '') +
+      statCard('Selling price', fmtMoney(q.sellingPriceTotal), 'accent') +
+      statCard('Profit', fmtMoney(q.profit), q.profit>=0?'':'warn') +
+      statCard('Margin', q.profitMargin.toFixed(1)+'%', '') +
+      '</div>';
+
+    html += '<div class="sheet-wrap"><div class="sheet">';
+    html += '<div class="sheet-head">';
+    html += '<div><div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
+    if(business.address) html += '<div class="sheet-meta-line">'+esc(business.address).replace(/\n/g,'<br>')+'</div>';
+    if(business.email) html += '<div class="sheet-meta-line">'+esc(business.email)+(business.phone?' · '+esc(business.phone):'')+'</div>';
+    if(business.regNumber) html += '<div class="sheet-meta-line">Reg / VAT: '+esc(business.regNumber)+'</div>';
+    html += '</div>';
+    html += '<div class="sheet-doctitle"><div class="kind">QUOTE</div><div class="num">'+esc(q.quoteNumber)+'</div>' +
+      '<div class="sheet-dates" style="margin-top:8px;">Issued '+fmtDate(q.quoteDate)+'<br>Valid until '+fmtDate(q.validUntil)+'</div></div>';
+    html += '</div>';
+
+    html += '<div class="sheet-parties"><div class="block"><div class="label">Quoted to</div>' +
+      '<strong>'+esc(c.name||'—')+'</strong><br>' +
+      (c.company? esc(c.company)+'<br>' : '') +
+      (c.address? esc(c.address).replace(/\n/g,'<br>')+'<br>' : '') +
+      (c.email? esc(c.email)+'<br>':'') +
+      (c.phone? esc(c.phone):'') +
+      '</div></div>';
+
+    html += '<div class="table-wrap"><table><thead><tr><th>Description</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Unit price</th><th style="text-align:right;">Amount</th></tr></thead><tbody>';
+    html += '<tr><td>'+esc(q.jobName)+'</td><td class="num-cell">'+q.quantity+'</td><td class="num-cell">'+fmtMoney(q.sellingPricePerUnit)+'</td><td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td></tr>';
+    html += '</tbody></table></div>';
+
+    html += '<div class="totals" style="margin-top:16px;">' +
+      '<div class="totals-row total"><span>Total</span><span class="mono">'+fmtMoney(q.sellingPriceTotal)+'</span></div>' +
+      '</div>';
+
+    if(q.notes) html += '<div class="sheet-notes">'+esc(q.notes)+'</div>';
+    html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
+    html += '</div></div>';
+
+    /* internal cost breakdown — not part of the printable client sheet */
+    html += '<div class="card card-pad no-print" style="margin-top:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Internal cost breakdown (frozen at save time)</h3>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Item</th><th class="num-cell">Cost</th></tr></thead><tbody>';
+    [['Filament', q.filamentCost], ['Electricity', q.electricityCost], ['Machine (depreciation + maintenance)', q.machineCost],
+     ['Labour', q.labourCost], ['Post-processing', q.postProcessingCost], ['Consumables', q.consumablesCost],
+     ['Packaging', q.packagingCost], ['Other', q.otherCost]].forEach(function(row){
+      html += '<tr><td>'+row[0]+'</td><td class="num-cell">'+fmtMoney(row[1])+'</td></tr>';
+    });
+    html += '<tr><td><strong>Total cost</strong></td><td class="num-cell"><strong>'+fmtMoney(q.totalCost)+'</strong></td></tr>';
+    html += '</tbody></table></div>';
+    html += '<p class="hint" style="margin-top:10px;">Printer: '+esc(q.printerSnapshot ? q.printerSnapshot.name : '—')+' · '+q.totalPrintHours.toFixed(2)+' print hours · '+(q.plates>1?(q.plates+' plates · '):'')+'Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
+    html += '</div>';
+
+    return html;
+  }
+  function downloadSpQuotePdf(q){
+    if(quotePdfBusy) return;
+    var el = document.querySelector('.sheet');
+    if(!el) return;
+    if(!window.html2pdf){
+      alertBanner('Could not load the PDF tool — printing instead.');
+      window.print();
+      return;
+    }
+    quotePdfBusy = q.id;
+    render();
+    var opt = {
+      margin: 0,
+      filename: (q.quoteNumber || 'quote') + '.pdf',
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
+    window.html2pdf().set(opt).from(el).save().then(function(){
+      quotePdfBusy = null;
+      render();
+    }).catch(function(){
+      quotePdfBusy = null;
+      alertBanner('Could not generate the PDF — try Print instead.');
+      render();
+    });
   }
 
   /* ---------- settings ---------- */
@@ -2578,7 +3010,7 @@
       });
     }
     else if(modal.type === 'printer'){
-      var pr = modal.editingId ? printers.find(function(x){return x.id===modal.editingId;}) : {name:'',manufacturer:'',model:'',purchasePrice:0,purchaseDate:todayISO(),powerWatts:200,expectedLifeHours:10000,maintenancePerHour:0,manualHourlyCost:0,useManualHourlyCost:false,defaultWasteGrams:0,active:true};
+      var pr = modal.editingId ? printers.find(function(x){return x.id===modal.editingId;}) : {name:'',manufacturer:'',model:'',purchasePrice:0,purchaseDate:todayISO(),powerWatts:200,expectedLifeHours:10000,maintenancePerHour:0,manualHourlyCost:0,useManualHourlyCost:false,defaultWasteGrams:0,capacityHoursPerMonth:200,active:true};
       root.innerHTML = '<div class="modal-backdrop" id="modal-backdrop"><div class="modal">' +
         '<h2>'+(modal.editingId?'Edit printer':'Add printer')+'</h2>' +
         '<form id="printer-form">' +
@@ -2587,6 +3019,7 @@
         fieldRow([field('p-purchase-price','Purchase price (R)', pr.purchasePrice, 'number'), field('p-purchase-date','Purchase date', pr.purchaseDate, 'date')]) +
         fieldRow([field('p-power','Power consumption (W)', pr.powerWatts, 'number'), field('p-life','Expected useful life (hours)', pr.expectedLifeHours, 'number')]) +
         fieldRow([field('p-maintenance','Maintenance cost / hour (R)', pr.maintenancePerHour, 'number'), field('p-waste','Default waste for this printer (grams, from your slicer)', pr.defaultWasteGrams, 'number')]) +
+        field('p-capacity','Available printing hours per month — for the Dashboard utilisation figure', pr.capacityHoursPerMonth, 'number') +
         '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Use a manual hourly cost instead of calculating it</span><label class="switch"><input type="checkbox" id="p-manual-toggle" name="useManualHourlyCost" '+(pr.useManualHourlyCost?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
         '<div id="p-manual-cost-wrap" style="'+(pr.useManualHourlyCost?'':'display:none;')+'">' + field('p-manual-cost','Manual hourly cost (R / hour)', pr.manualHourlyCost, 'number') + '</div>' +
         '<div class="switch-row" style="margin-bottom:6px;"><span style="font-size:13.5px; font-weight:600;">Active</span><label class="switch"><input type="checkbox" name="active" '+(pr.active!==false?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
@@ -2609,6 +3042,7 @@
           purchasePrice: Number(fd.get('p-purchase-price'))||0, purchaseDate: fd.get('p-purchase-date')||'',
           powerWatts: Number(fd.get('p-power'))||0, expectedLifeHours: Number(fd.get('p-life'))||1,
           maintenancePerHour: Number(fd.get('p-maintenance'))||0, defaultWasteGrams: Number(fd.get('p-waste'))||0,
+          capacityHoursPerMonth: Number(fd.get('p-capacity'))||0,
           useManualHourlyCost: fd.get('useManualHourlyCost')==='on', manualHourlyCost: Number(fd.get('p-manual-cost'))||0,
           active: fd.get('active')==='on'
         };
@@ -2760,6 +3194,23 @@
     if(askDelReport){ uiConfirm = 'report-' + askDelReport.getAttribute('data-ask-delete-report'); render(); return; }
     var confirmDelReport = e.target.closest('[data-confirm-delete-report]');
     if(confirmDelReport){ deleteReport(confirmDelReport.getAttribute('data-confirm-delete-report')); return; }
+
+    var setQuoteStatusBtn = e.target.closest('[data-set-quote-status]');
+    if(setQuoteStatusBtn){ setSpQuoteStatus(setQuoteStatusBtn.getAttribute('data-quote-id'), setQuoteStatusBtn.getAttribute('data-set-quote-status')); return; }
+
+    var editQuoteBtn = e.target.closest('[data-edit-quote]');
+    if(editQuoteBtn){ var eq = spQuotes.find(function(x){return x.id===editQuoteBtn.getAttribute('data-edit-quote');}); if(eq) editQuoteInCalculator(eq); return; }
+
+    var dupQuoteBtn = e.target.closest('[data-duplicate-quote]');
+    if(dupQuoteBtn){ var dq = spQuotes.find(function(x){return x.id===dupQuoteBtn.getAttribute('data-duplicate-quote');}); if(dq) duplicateQuoteInCalculator(dq); return; }
+
+    var askDelQuote = e.target.closest('[data-ask-delete-quote]');
+    if(askDelQuote){ uiConfirm = 'spquote-' + askDelQuote.getAttribute('data-ask-delete-quote'); render(); return; }
+    var confirmDelQuote = e.target.closest('[data-confirm-delete-quote]');
+    if(confirmDelQuote){ var delId = confirmDelQuote.getAttribute('data-confirm-delete-quote'); deleteSpQuote(delId); uiConfirm=null; if(view.name==='spQuoteView' && view.params.id===delId) go('spquotes'); else render(); return; }
+
+    var quotePdfBtn = e.target.closest('[data-download-quote-pdf]');
+    if(quotePdfBtn){ var pq = spQuotes.find(function(x){return x.id===quotePdfBtn.getAttribute('data-download-quote-pdf');}); if(pq) downloadSpQuotePdf(pq); return; }
   });
 
   document.addEventListener('submit', function(e){
