@@ -140,7 +140,7 @@
   .badge-invoice{ background:var(--accent-soft); color:var(--accent-ink); }
   .badge-quote{ background:var(--line); color:var(--ink-soft); }
   .badge-quoted{ background:var(--pending-soft); color:var(--pending); }
-  .badge-approved{ background:var(--good-soft); color:var(--good); }
+  .badge-accepted{ background:var(--good-soft); color:var(--good); }
   .badge-printing{ background:var(--accent-soft); color:var(--accent-ink); }
   .badge-completed{ background:var(--good-soft); color:var(--good); }
   .badge-invoiced{ background:var(--accent-soft); color:var(--accent-ink); }
@@ -187,6 +187,8 @@
   .grid-3{ grid-template-columns:repeat(3,1fr); }
   .grid-4{ grid-template-columns:repeat(4,1fr); }
   @media (max-width:720px){ .grid-2,.grid-3,.grid-4{ grid-template-columns:1fr; } }
+  .workspace-card{ text-align:left; cursor:pointer; font-family:inherit; width:100%; transition:border-color .15s, transform .15s; }
+  .workspace-card:hover{ border-color:var(--accent); transform:translateY(-1px); }
 
   .stat{ padding:16px 18px; }
   .stat-label{ font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--ink-faint); }
@@ -219,6 +221,11 @@
   .switch input:checked + .track{ background:var(--accent); }
   .switch .thumb{ position:absolute; top:2px; left:2px; width:18px; height:18px; background:#fff; border-radius:50%; transition:left .15s; box-shadow:0 1px 2px rgba(0,0,0,.3); }
   .switch input:checked ~ .thumb{ left:18px; }
+
+  .progress-bar{ position:relative; height:8px; border-radius:100px; background:var(--line-strong); overflow:hidden; }
+  .progress-bar .fill{ position:absolute; inset:0 auto 0 0; height:100%; border-radius:100px; background:var(--accent); transition:width .15s; }
+  .progress-bar .fill.complete{ background:var(--good); }
+  .worksheet-count{ width:64px; text-align:center; }
 
   .items-table th, .items-table td{ padding:8px 8px; }
   .items-table input{ padding:7px 8px; }
@@ -297,6 +304,7 @@
     </div>
     <nav class="tabs" id="tabs"></nav>
     <div class="topbar-spacer"></div>
+    <div id="workspace-switch-slot"></div>
   </div>
 </div>
 <main id="view"></main>
@@ -324,12 +332,34 @@
     d.setDate(d.getDate() + n);
     return d.toISOString().slice(0,10);
   }
+  // Adds a number of hours to an ISO date (YYYY-MM-DD), returning an ISO date.
+  // Used for estimated finish dates, assuming continuous (24h/day) printing.
+  function addHoursISO(dateISO, hours){
+    if(!dateISO) return '';
+    var d = new Date(dateISO + 'T00:00:00');
+    if(isNaN(d)) return '';
+    d.setTime(d.getTime() + (Number(hours)||0) * 3600000);
+    return d.toISOString().slice(0,10);
+  }
+  // Estimated finish date for a Solid Prints quote/order, derived (not stored) from
+  // its start date plus total print time — continuous printing, no start date means no estimate.
+  function estimatedFinishDate(q){
+    if(!q || !q.startDate) return '';
+    var hours = q.isSplit ? (Number(q.turnaroundHours)||0) : (Number(q.totalPrintHours)||0);
+    return addHoursISO(q.startDate, hours);
+  }
   function uid(){ return Math.random().toString(36).slice(2,10); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function pad4(n){ n = Math.max(1, n|0); return String(n).padStart(4,'0'); }
 
   /* ---------------- state ---------------- */
   var dbNS = null;          // resolved db capability namespace, or null
+  // Which side of the operation is active — 'sp' (Solid Prints, 3D printing) or 'ce'
+  // (Charl Engelbrecht — hosting/marketing/web). null means "not chosen yet", which
+  // shows the workspace chooser instead of any tab content. Remembered per-browser via
+  // localStorage (falls back to null, i.e. always asks, if storage isn't available).
+  var workspace = null;
+  try{ workspace = localStorage.getItem('sp_invoicing_workspace') || null; }catch(e){ workspace = null; }
   var business = defaultBusiness();
   var clients = [];
   var docs = [];
@@ -357,6 +387,7 @@
   var calcEditingQuoteId = null; // set while the calculator is editing an existing Draft quote, so Save updates it in place
   var spQuotes = [];         // saved Solid Prints quotes — each doc is a full, frozen cost snapshot (see freezeQuoteFromCalc)
   var quoteFilter = { status: '', clientId: '', printerId: '', minProfit: '', maxProfit: '', from: '', to: '' };
+  var worksheetShowAll = false; // Work Sheet defaults to just in-production orders (Accepted/Printing); toggle to also see Completed ones
 
   function defaultSpSettings(){
     return {
@@ -374,6 +405,7 @@
   function blankCalc(){
     return {
       jobName: '', clientId: '', quantity: 1, printerId: (printers[0] && printers[0].id) || '',
+      startDate: '',                   // optional — when production is planned to start
       calcType: 'single',              // 'plate' | 'single'
       unitsPerPlate: '', printTimePerPlate: '', printTimeHours: '',
       filamentGrams: {},               // materialId -> grams (per plate if calcType 'plate', else job total;
@@ -763,10 +795,28 @@
     counters.spquote = n;
     if(dbNS) dbNS.doc('counters/spquote').set({ next: n });
   }
+  // Work Sheet progress fields (completedQuantity / legsCompleted) are operational data, not
+  // part of the frozen cost/pricing snapshot — carried forward here (mirroring how `status`
+  // is handled) so re-editing a quote's costing details never wipes out progress already
+  // checked off on the Work Sheet. Clamped down if quantity was reduced on re-save.
+  function reconcileCompletedQuantity(prevCompleted, totalQuantity){
+    var prev = Number(prevCompleted) || 0;
+    var cap = Math.max(0, Number(totalQuantity)||0);
+    return Math.min(prev, cap);
+  }
+  function reconcileLegsCompleted(existingLegsCompleted, legs){
+    existingLegsCompleted = existingLegsCompleted || [];
+    return (legs||[]).map(function(leg, i){
+      var prev = Number(existingLegsCompleted[i]) || 0;
+      var cap = Math.max(0, Number(leg.quantity)||0);
+      return Math.min(prev, cap);
+    });
+  }
   function saveQuoteFromCalc(){
     if(!dbNS) return;
     var snap = freezeQuoteFromCalc();
     var now = new Date().toISOString();
+    snap.startDate = calc.startDate || '';
     if(calcEditingQuoteId){
       var existing = spQuotes.find(function(q){ return q.id === calcEditingQuoteId; });
       snap.status = existing ? existing.status : 'Draft';
@@ -774,12 +824,16 @@
       snap.createdAt = existing ? existing.createdAt : now;
       snap.updatedAt = now;
       snap.convertedToInvoiceNumber = existing ? existing.convertedToInvoiceNumber : null;
+      snap.completedQuantity = reconcileCompletedQuantity(existing ? existing.completedQuantity : 0, snap.quantity);
+      snap.legsCompleted = snap.isSplit ? reconcileLegsCompleted(existing ? existing.legsCompleted : [], snap.legs) : [];
       dbNS.doc('spQuotes/' + calcEditingQuoteId).set(snap);
       go('spQuoteView', { id: calcEditingQuoteId });
     } else {
       snap.status = 'Draft';
       snap.quoteNumber = nextSpQuoteNumber();
       snap.createdAt = now; snap.updatedAt = now;
+      snap.completedQuantity = 0;
+      snap.legsCompleted = snap.isSplit ? (snap.legs||[]).map(function(){ return 0; }) : [];
       dbNS.collection('spQuotes').add(snap).then(function(ref){
         bumpSpQuoteCounter();
         go('spQuoteView', { id: ref.id });
@@ -796,6 +850,10 @@
     }
   }
   function deleteSpQuote(id){ if(dbNS) dbNS.doc('spQuotes/' + id).delete(); }
+  function updateQuoteStartDate(id, value){
+    if(!dbNS) return;
+    dbNS.doc('spQuotes/' + id).update({ startDate: value, updatedAt: new Date().toISOString() });
+  }
   function createInvoiceFromQuote(q){
     if(!dbNS) return;
     var inv = blankDraft('invoice');
@@ -822,6 +880,7 @@
     }
     return {
       jobName: q.jobName || '', clientId: q.clientId || '', quantity: q.quantity || 1, printerId: q.printerId || '',
+      startDate: q.startDate || '',
       calcType: q.calcType || 'single',
       unitsPerPlate: q.unitsPerPlate || '', printTimePerPlate: q.printTimePerPlate || '', printTimeHours: q.printTimeHours || '',
       filamentGrams: grams,
@@ -845,6 +904,7 @@
   function duplicateQuoteInCalculator(q){
     calc = loadCalcFromQuote(q);
     calc.jobName = calc.jobName + ' (copy)';
+    calc.startDate = ''; // a duplicated order is a fresh job — don't carry over the old start date
     calcEditingQuoteId = null;
     go('calculator');
   }
@@ -1114,6 +1174,18 @@
     if(dbNS) dbNS.doc('counters/' + kind).set({ next: n });
   }
 
+  /* ---------------- workspace (Solid Prints vs Charl Engelbrecht) ---------------- */
+  function chooseWorkspace(ws){
+    workspace = ws;
+    try{ localStorage.setItem('sp_invoicing_workspace', ws); }catch(e){}
+    go('dashboard');
+  }
+  function switchWorkspace(){
+    workspace = null;
+    try{ localStorage.removeItem('sp_invoicing_workspace'); }catch(e){}
+    render();
+  }
+
   /* ---------------- navigation ---------------- */
   function go(name, params){
     view = { name: name, params: params || {} };
@@ -1281,15 +1353,24 @@
   /* ============================================================
      RENDER
      ============================================================ */
-  var TABS = [
+  // Two separate tab sets — which one shows depends on the chosen workspace (see
+  // renderWorkspaceChooser / chooseWorkspace / switchWorkspace above). 'dashboard' and
+  // 'settings' exist as a view name in both sets; renderDashboard()/renderSettings()
+  // branch internally on `workspace` to show the right content.
+  var TABS_SP = [
     {name:'dashboard', label:'Dashboard'},
     {name:'calculator', label:'Calculator'},
     {name:'spquotes', label:'Quotes'},
-    {name:'documents', label:'Documents'},
-    {name:'clients', label:'Clients'},
+    {name:'worksheet', label:'Work Sheet'},
     {name:'printers', label:'Printers'},
     {name:'materials', label:'Materials'},
     {name:'consumables', label:'Consumables'},
+    {name:'settings', label:'Settings'}
+  ];
+  var TABS_CE = [
+    {name:'dashboard', label:'Dashboard'},
+    {name:'documents', label:'Documents'},
+    {name:'clients', label:'Clients'},
     {name:'reports', label:'Reports'},
     {name:'settings', label:'Settings'}
   ];
@@ -1299,6 +1380,11 @@
     var el = document.getElementById('view');
     if(connectState !== 'signed-in'){
       el.innerHTML = renderAuthGate();
+      renderModal();
+      return;
+    }
+    if(!workspace){
+      el.innerHTML = renderWorkspaceChooser();
       renderModal();
       return;
     }
@@ -1313,6 +1399,7 @@
       case 'calculator': html += renderCalculator(); break;
       case 'spquotes': html += renderSpQuotes(); break;
       case 'spQuoteView': html += renderSpQuoteView(); break;
+      case 'worksheet': html += renderWorkSheet(); break;
       case 'reports': html += renderReports(); break;
       case 'reportBuilder': html += renderReportBuilder(); break;
       case 'settings': html += renderSettings(); break;
@@ -1326,11 +1413,15 @@
     if(view.name === 'reportBuilder') wireReportBuilderEvents();
     if(view.name === 'calculator') wireCalculatorEvents();
     if(view.name === 'spquotes') wireSpQuotesEvents();
+    if(view.name === 'spQuoteView') wireSpQuoteViewEvents();
+    if(view.name === 'worksheet') wireWorkSheetEvents();
   }
 
   function renderTabs(){
     var t = document.getElementById('tabs');
-    t.innerHTML = TABS.map(function(tb){
+    var showTabs = connectState === 'signed-in' && workspace;
+    var TABS = workspace === 'sp' ? TABS_SP : TABS_CE;
+    t.innerHTML = !showTabs ? '' : TABS.map(function(tb){
       var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents') || (view.name==='reportBuilder' && tb.name==='reports') || (view.name==='spQuoteView' && tb.name==='spquotes');
       return '<button class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '">' + tb.label + '</button>';
     }).join('');
@@ -1340,6 +1431,34 @@
       ind.textContent = connectState === 'signed-in' ? ('synced · ' + (currentUser ? currentUser.email : ''))
         : '';
     }
+
+    var switchSlot = document.getElementById('workspace-switch-slot');
+    if(switchSlot){
+      switchSlot.innerHTML = showTabs
+        ? '<button type="button" class="btn btn-sm btn-ghost" id="workspace-switch-btn">' +
+          (workspace==='sp' ? '🖨️ Solid Prints' : '💼 Charl Engelbrecht') + ' · switch</button>'
+        : '';
+      var swBtn = document.getElementById('workspace-switch-btn');
+      if(swBtn) swBtn.addEventListener('click', switchWorkspace);
+    }
+  }
+  function renderWorkspaceChooser(){
+    var html = '<div style="max-width:640px; margin:60px auto 0;">';
+    html += '<div style="text-align:center; margin-bottom:28px;"><h1 style="margin-bottom:6px;">Which side are you working on?</h1>' +
+      '<div class="view-sub">Pick a business to continue — you can switch anytime from the top bar.</div></div>';
+    html += '<div class="grid grid-2">';
+    html += '<button type="button" class="card card-pad workspace-card" data-choose-workspace="sp">' +
+      '<div style="font-size:28px; margin-bottom:8px;">🖨️</div>' +
+      '<div style="font-weight:700; font-size:16px; margin-bottom:4px;">Solid Prints</div>' +
+      '<div class="hint">3D printing — Calculator, Quotes, Work Sheet, Materials, Printers, Consumables</div>' +
+      '</button>';
+    html += '<button type="button" class="card card-pad workspace-card" data-choose-workspace="ce">' +
+      '<div style="font-size:28px; margin-bottom:8px;">💼</div>' +
+      '<div style="font-weight:700; font-size:16px; margin-bottom:4px;">Charl Engelbrecht</div>' +
+      '<div class="hint">Hosting, marketing &amp; web design — Documents, Clients, Reports</div>' +
+      '</button>';
+    html += '</div></div>';
+    return html;
   }
 
   function renderAuthGate(){
@@ -1368,6 +1487,14 @@
 
   /* ---------- dashboard ---------- */
   function renderDashboard(){
+    return workspace === 'sp' ? renderDashboardSolidPrints() : renderDashboardCharl();
+  }
+  function renderDashboardSolidPrints(){
+    var html = '<div class="view-head"><div><h1>🖨️ Solid Prints</h1><div class="view-sub">3D printing — production &amp; costing dashboard</div></div></div>';
+    html += renderSpDashboardSection();
+    return html;
+  }
+  function renderDashboardCharl(){
     var outstanding = docs.filter(function(d){ return d.kind==='invoice' && d.status==='Sent'; })
       .reduce(function(s,d){ return s + docTotals(d).total; }, 0);
     var overdueCount = docs.filter(isOverdue).length;
@@ -1375,7 +1502,7 @@
 
     var recent = docs.slice(0,6);
 
-    var html = '<div class="view-head"><div><h1>Dashboard</h1><div class="view-sub">' + esc(business.legalName || 'Charl Engelbrecht') + '</div></div>' +
+    var html = '<div class="view-head"><div><h1>💼 Dashboard</h1><div class="view-sub">' + esc(business.legalName || 'Charl Engelbrecht') + '</div></div>' +
       '<div class="actions-row">' +
       '<button class="btn btn-primary" data-nav="newDoc" data-kind="invoice">+ New invoice</button>' +
       '<button class="btn" data-nav="newDoc" data-kind="quote">+ New quote</button>' +
@@ -1387,8 +1514,6 @@
       statCard('Drafts', String(draftCount), '') +
       statCard('Clients', String(clients.length), '') +
       '</div>';
-
-    html += renderSpDashboardSection();
 
     html += '<div class="card"><div class="card-pad" style="padding-bottom:12px;"><h2 style="font-size:16px;">Recent documents</h2></div>';
     if(!recent.length){
@@ -1413,19 +1538,24 @@
     return html;
   }
 
+  // Once a quote is Accepted, it's a real committed job — from then on (Accepted, Printing,
+  // Completed, Invoiced or Paid) it counts toward revenue, profit and printer utilisation on
+  // the dashboard. Draft/Quoted don't count yet (nothing's committed), Cancelled never counts.
+  var COUNTS_TOWARD_DASHBOARD_STATS = ['Accepted','Printing','Completed','Invoiced','Paid'];
   function renderSpDashboardSection(){
     var monthKey = todayISO().slice(0,7);
     var thisMonthQuotes = spQuotes.filter(function(q){ return (q.quoteDate||'').slice(0,7) === monthKey; });
     var completedThisMonth = thisMonthQuotes.filter(function(q){ return q.status==='Completed' || q.status==='Invoiced' || q.status==='Paid'; });
     var printsThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.quantity)||0); }, 0);
-    var revenueThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.sellingPriceTotal)||0); }, 0);
-    var profitThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.profit)||0); }, 0);
+
+    var acceptedOrLaterThisMonth = thisMonthQuotes.filter(function(q){ return COUNTS_TOWARD_DASHBOARD_STATS.indexOf(q.status) !== -1; });
+    var revenueThisMonth = acceptedOrLaterThisMonth.reduce(function(s,q){ return s + (Number(q.sellingPriceTotal)||0); }, 0);
+    var profitThisMonth = acceptedOrLaterThisMonth.reduce(function(s,q){ return s + (Number(q.profit)||0); }, 0);
 
     var activePrinters = printers.filter(function(p){ return p.active !== false; });
     var totalCapacity = activePrinters.reduce(function(s,p){ return s + (Number(p.capacityHoursPerMonth)||0); }, 0);
-    var nonCancelledThisMonth = thisMonthQuotes.filter(function(q){ return q.status !== 'Cancelled'; });
     var hoursByPrinter = {};
-    nonCancelledThisMonth.forEach(function(q){
+    acceptedOrLaterThisMonth.forEach(function(q){
       if(q.isSplit){
         (q.legs||[]).forEach(function(l){ hoursByPrinter[l.printerId] = (hoursByPrinter[l.printerId]||0) + (Number(l.totalPrintHours)||0); });
       } else if(q.printerId){
@@ -1439,7 +1569,7 @@
 
     var html = '<div class="card card-pad" style="margin-bottom:22px;">';
     html += '<div class="view-head" style="margin-bottom:16px;"><div><h2 style="font-size:16px;">🖨️ Solid Prints — this month</h2>' +
-      '<div class="view-sub">Completed, invoiced &amp; paid quotes with a quote date in ' + monthLabel(monthKey) + '</div></div>' +
+      '<div class="view-sub">Revenue, profit &amp; utilisation count quotes Accepted or further along · quote date in ' + monthLabel(monthKey) + '</div></div>' +
       '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote</button><button class="btn" data-nav="spquotes">View all quotes</button></div></div>';
 
     html += '<div class="grid grid-4" style="margin-bottom:18px;">' +
@@ -1732,6 +1862,9 @@
       '<option value="">Choose a customer…</option>' +
       clients.map(function(cl){ return '<option value="'+cl.id+'"'+(calc.clientId===cl.id?' selected':'')+'>'+esc(cl.name)+(cl.company?' — '+esc(cl.company):'')+'</option>'; }).join('') +
       '</select></div>';
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Start date <span style="font-weight:400; color:var(--ink-faint);">— optional, used for the estimated finish date</span></label><input id="calc-start-date" type="date" value="'+esc(calc.startDate||'')+'"></div>';
     html += '</div>';
     html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Split this job across more than one printer<br><span style="font-weight:400; color:var(--ink-faint); font-size:12px;">Different printers, different build plates — cost each portion against its own machine.</span></span><label class="switch"><input type="checkbox" id="calc-split-enabled" '+(calc.splitEnabled?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>';
     html += '<div class="field-row">';
@@ -2152,6 +2285,9 @@
     var clientSel = document.getElementById('calc-client');
     if(clientSel) clientSel.addEventListener('change', function(){ calc.clientId = this.value; });
 
+    var startDateEl = document.getElementById('calc-start-date');
+    if(startDateEl) startDateEl.addEventListener('change', function(){ calc.startDate = this.value; });
+
     var printerSel = document.getElementById('calc-printer');
     if(printerSel) printerSel.addEventListener('change', function(){
       calc.printerId = this.value;
@@ -2337,9 +2473,9 @@
   }
 
   /* ---------- Solid Prints quotes ---------- */
-  var QUOTE_STATUSES = ['Draft','Quoted','Approved','Printing','Completed','Invoiced','Paid','Cancelled'];
+  var QUOTE_STATUSES = ['Draft','Quoted','Accepted','Printing','Completed','Invoiced','Paid','Cancelled'];
   function spQuoteStatusBadge(status){
-    var cls = {Draft:'badge-draft', Quoted:'badge-quoted', Approved:'badge-approved', Printing:'badge-printing',
+    var cls = {Draft:'badge-draft', Quoted:'badge-quoted', Accepted:'badge-accepted', Printing:'badge-printing',
       Completed:'badge-completed', Invoiced:'badge-invoiced', Paid:'badge-paid', Cancelled:'badge-cancelled'}[status] || 'badge-draft';
     return '<span class="badge ' + cls + '">' + esc(status) + '</span>';
   }
@@ -2464,6 +2600,18 @@
     }).join('') + '</div>';
     html += '</div>';
 
+    var finishDate = estimatedFinishDate(q);
+    html += '<div class="card card-pad no-print" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Production</h3>';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Start date</label><input type="date" id="quote-start-date" value="'+esc(q.startDate||'')+'"></div>';
+    html += '<div class="field"><label>Estimated finish <span style="font-weight:400; color:var(--ink-faint);">— continuous printing</span></label><input type="text" value="'+esc(finishDate ? fmtDate(finishDate) : (q.startDate ? '—' : 'Set a start date')) +'" readonly></div>';
+    html += '</div>';
+    if(q.status==='Accepted' || q.status==='Printing'){
+      html += '<p class="hint">Track completed units on the <a href="javascript:void(0)" data-nav="worksheet">Work Sheet</a>.</p>';
+    }
+    html += '</div>';
+
     if(q.convertedToInvoiceNumber) html += '<div class="banner no-print">This quote was invoiced as <strong>&nbsp;'+esc(q.convertedToInvoiceNumber)+'</strong>.</div>';
 
     var sm = statusMeta(q.status==='Cancelled' ? 'red' : (q.profitMargin >= (spSettings.minimumMarginPct||0) ? 'green' : (q.profitMargin > 0 ? 'yellow' : 'red')));
@@ -2533,6 +2681,113 @@
 
     return html;
   }
+  function wireSpQuoteViewEvents(){
+    var startDateEl = document.getElementById('quote-start-date');
+    if(startDateEl) startDateEl.addEventListener('change', function(){
+      updateQuoteStartDate(view.params.id, this.value);
+    });
+  }
+
+  /* ---------------- Work Sheet — check off completed units per order ---------------- */
+  // Orders on the floor: Accepted/Printing by default, plus Completed/Invoiced/Paid when
+  // the "also show" toggle is on (handy to double-check a finished order's tally).
+  function worksheetOrders(){
+    var statuses = worksheetShowAll ? ['Accepted','Printing','Completed','Invoiced','Paid'] : ['Accepted','Printing'];
+    return spQuotes.filter(function(q){ return statuses.indexOf(q.status) !== -1; })
+      .sort(function(a,b){ return (a.startDate||a.quoteDate||'') < (b.startDate||b.quoteDate||'') ? -1 : 1; });
+  }
+  function worksheetOrderCompleted(q){
+    if(q.isSplit) return (q.legsCompleted||[]).reduce(function(s,n){ return s + (Number(n)||0); }, 0);
+    return Number(q.completedQuantity)||0;
+  }
+  function renderWorkSheet(){
+    var orders = worksheetOrders();
+    var html = '<div class="view-head"><div><h1>Work Sheet</h1><div class="view-sub">Check off how many units of each order are done — the Dashboard and quote view stay in sync automatically.</div></div>' +
+      '<div class="actions-row"><label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-soft); cursor:pointer;"><input type="checkbox" id="worksheet-show-all"'+(worksheetShowAll?' checked':'')+'> Also show completed/invoiced orders</label></div></div>';
+
+    if(!orders.length){
+      html += emptyState('🧾', 'Nothing in production right now', 'Orders show up here once a quote\'s status is set to Accepted — set that on the quote itself.', [
+        {label:'View quotes', nav:'spquotes', primary:true}
+      ]);
+      return html;
+    }
+
+    html += '<div class="grid" style="grid-template-columns:1fr; gap:14px;">';
+    orders.forEach(function(q){
+      var totalQty = Math.max(0, Number(q.quantity)||0);
+      var completed = Math.min(totalQty, worksheetOrderCompleted(q));
+      var pct = totalQty > 0 ? Math.min(100, Math.round((completed/totalQty)*100)) : 0;
+      var isDone = totalQty > 0 && completed >= totalQty;
+      var canMarkCompleted = isDone && ['Accepted','Printing'].indexOf(q.status) !== -1;
+
+      html += '<div class="card card-pad">';
+      html += '<div class="view-head" style="margin-bottom:12px;">';
+      html += '<div><div style="font-weight:700; font-size:14.5px;">'+esc(q.jobName||'Untitled job')+' <span style="font-weight:400; color:var(--ink-faint); font-size:12.5px;">'+esc(q.quoteNumber||'')+'</span></div>';
+      html += '<div class="hint">'+esc(spQuoteClientLabel(q))+' · Qty '+totalQty+(q.startDate?' · Started '+fmtDate(q.startDate):' · No start date set')+'</div></div>';
+      html += '<div>'+spQuoteStatusBadge(q.status)+'</div>';
+      html += '</div>';
+
+      html += '<div style="display:flex; align-items:center; gap:10px; margin-bottom:'+(q.isSplit?'14px':'2px')+';">';
+      html += '<div class="progress-bar" style="flex:1;"><div class="fill'+(isDone?' complete':'')+'" style="width:'+pct+'%;"></div></div>';
+      html += '<span class="hint mono" style="white-space:nowrap;">'+completed+' / '+totalQty+' ('+pct+'%)</span>';
+      html += '</div>';
+
+      if(q.isSplit){
+        (q.legs||[]).forEach(function(leg, i){
+          var legQty = Math.max(0, Number(leg.quantity)||0);
+          var legCompleted = Math.min(legQty, Number((q.legsCompleted||[])[i]) || 0);
+          var legPct = legQty > 0 ? Math.min(100, Math.round((legCompleted/legQty)*100)) : 0;
+          html += '<div style="display:flex; align-items:center; gap:10px; margin-bottom:8px; padding-left:10px; border-left:2px solid var(--line-strong);">';
+          html += '<div style="flex:0 0 150px; font-size:12.5px; color:var(--ink-soft);">'+esc(leg.printerName||'Printer')+'</div>';
+          html += '<div class="progress-bar" style="flex:1;"><div class="fill'+(legQty>0 && legCompleted>=legQty?' complete':'')+'" style="width:'+legPct+'%;"></div></div>';
+          html += '<input type="number" class="worksheet-count" min="0" max="'+legQty+'" step="1" value="'+legCompleted+'" data-quote-id="'+q.id+'" data-leg-idx="'+i+'">';
+          html += '<span class="hint" style="white-space:nowrap;">/ '+legQty+'</span>';
+          html += '</div>';
+        });
+      } else {
+        html += '<div style="display:flex; align-items:center; gap:10px; margin-bottom:2px;">';
+        html += '<input type="number" class="worksheet-count" min="0" max="'+totalQty+'" step="1" value="'+completed+'" data-quote-id="'+q.id+'" data-order-completed="1">';
+        html += '<span class="hint">completed of '+totalQty+'</span>';
+        html += '</div>';
+      }
+
+      if(canMarkCompleted) html += '<p class="hint" style="margin-top:10px;"><button type="button" class="btn btn-sm btn-primary" data-worksheet-mark-completed="'+q.id+'">Mark order Completed</button></p>';
+      html += '<p class="hint" style="margin-top:8px;"><button type="button" class="btn btn-sm btn-ghost" data-nav="spQuoteView" data-id="'+q.id+'">View quote →</button></p>';
+      html += '</div>';
+    });
+    html += '</div>';
+    return html;
+  }
+  function wireWorkSheetEvents(){
+    document.querySelectorAll('#view input[data-order-completed]').forEach(function(el){
+      el.addEventListener('change', function(){
+        var id = this.getAttribute('data-quote-id');
+        var q = spQuotes.find(function(x){ return x.id === id; });
+        if(!q || !dbNS) return;
+        var cap = Math.max(0, Number(q.quantity)||0);
+        var val = Math.max(0, Math.min(cap, Math.round(Number(this.value)||0)));
+        this.value = val;
+        dbNS.doc('spQuotes/' + id).update({ completedQuantity: val, updatedAt: new Date().toISOString() });
+      });
+    });
+    document.querySelectorAll('#view input[data-leg-idx]').forEach(function(el){
+      el.addEventListener('change', function(){
+        var id = this.getAttribute('data-quote-id');
+        var legIdx = Number(this.getAttribute('data-leg-idx'));
+        var q = spQuotes.find(function(x){ return x.id === id; });
+        if(!q || !dbNS) return;
+        var leg = (q.legs||[])[legIdx];
+        var cap = Math.max(0, Number(leg ? leg.quantity : 0)||0);
+        var val = Math.max(0, Math.min(cap, Math.round(Number(this.value)||0)));
+        this.value = val;
+        var legsCompleted = (q.legsCompleted||[]).slice();
+        while(legsCompleted.length < (q.legs||[]).length) legsCompleted.push(0);
+        legsCompleted[legIdx] = val;
+        dbNS.doc('spQuotes/' + id).update({ legsCompleted: legsCompleted, updatedAt: new Date().toISOString() });
+      });
+    });
+  }
+
   function downloadSpQuotePdf(q){
     if(quotePdfBusy) return;
     var el = document.querySelector('.sheet');
@@ -2562,16 +2817,26 @@
   }
 
   /* ---------- settings ---------- */
+  // Settings is split by workspace — Charl Engelbrecht gets the shared business/banking
+  // details (used on both companies' documents, since Charl owns both), Solid Prints gets
+  // its costing defaults. Both keep an Account card so sign-out is reachable from either side.
   function renderSettings(){
-    var b = business;
-    var html = '<div class="view-head"><div><h1>Settings</h1><div class="view-sub">Your details, shown on every invoice and quote</div></div></div>';
-
-    html += '<div class="card card-pad" style="margin-bottom:20px;">';
+    return workspace === 'sp' ? renderSettingsSp() : renderSettingsCharl();
+  }
+  function renderAccountSettingsCard(){
+    var html = '<div class="card card-pad" style="margin-bottom:20px;">';
     html += '<h3 style="font-size:14px; margin-bottom:10px; color:var(--ink-soft);">Account</h3>';
     html += '<p class="hint" style="margin-bottom:12px;">Signed in as <strong>' + esc(currentUser ? currentUser.email : '') + '</strong>. Your data syncs automatically to every device you sign in on — no file copying.</p>';
     html += '<div class="actions-row">';
     html += '<button type="button" class="btn btn-sm btn-ghost btn-danger" data-sign-out>Sign out</button>';
     html += '</div></div>';
+    return html;
+  }
+  function renderSettingsCharl(){
+    var b = business;
+    var html = '<div class="view-head"><div><h1>Settings</h1><div class="view-sub">Your details, shown on every invoice and quote — shared with Solid Prints, since you own both.</div></div></div>';
+
+    html += renderAccountSettingsCard();
 
     html += '<div class="card card-pad">';
     html += '<form id="business-form">';
@@ -2599,11 +2864,17 @@
 
     html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save settings</button></div>';
     html += '</form></div>';
+    return html;
+  }
+  function renderSettingsSp(){
+    var html = '<div class="view-head"><div><h1>🖨️ Solid Prints — Settings</h1><div class="view-sub">Costing defaults used across the Calculator, Printers, Materials and Consumables</div></div></div>';
 
-    html += '<div class="card card-pad" style="margin-top:20px;">';
+    html += renderAccountSettingsCard();
+
+    html += '<div class="card card-pad">';
     html += '<form id="solidprints-form">';
-    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">🖨️ Solid Prints — costing settings</h3>';
-    html += '<p class="hint" style="margin-bottom:14px;">Used across the Calculator, Printers, Materials and Consumables to work out cost and price. You can still override most of these for a specific job.</p>';
+    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">Costing settings</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Used to work out cost and price. You can still override most of these for a specific job.</p>';
     html += fieldRow([
       field('electricityRate','Electricity rate (R / kWh)', spSettings.electricityRate, 'text'),
       field('defaultLabourRate','Default labour rate (R / hour)', spSettings.defaultLabourRate, 'text')
@@ -2623,6 +2894,8 @@
     ]);
     html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save Solid Prints settings</button></div>';
     html += '</form></div>';
+
+    html += '<p class="hint" style="margin-top:14px;">Business &amp; banking details shown on the printed quote sheet are shared with Charl Engelbrecht, since you own both — edit them from the Charl Engelbrecht side (use the switch-business button in the top bar) → Settings.</p>';
     return html;
   }
   function field(name,label,value,type){
@@ -3524,6 +3797,9 @@
   document.addEventListener('click', function(e){
     if(e.target.closest('[data-sign-out]')){ e.preventDefault(); signOutNow(); return; }
 
+    var chooseWsEl = e.target.closest('[data-choose-workspace]');
+    if(chooseWsEl){ chooseWorkspace(chooseWsEl.getAttribute('data-choose-workspace')); return; }
+
     var navEl = e.target.closest('[data-nav]');
     if(navEl){
       var name = navEl.getAttribute('data-nav');
@@ -3610,6 +3886,12 @@
 
     var quotePdfBtn = e.target.closest('[data-download-quote-pdf]');
     if(quotePdfBtn){ var pq = spQuotes.find(function(x){return x.id===quotePdfBtn.getAttribute('data-download-quote-pdf');}); if(pq) downloadSpQuotePdf(pq); return; }
+
+    var worksheetShowAllToggle = e.target.closest('#worksheet-show-all');
+    if(worksheetShowAllToggle){ worksheetShowAll = worksheetShowAllToggle.checked; render(); return; }
+
+    var markCompletedBtn = e.target.closest('[data-worksheet-mark-completed]');
+    if(markCompletedBtn){ setSpQuoteStatus(markCompletedBtn.getAttribute('data-worksheet-mark-completed'), 'Completed'); return; }
   });
 
   document.addEventListener('submit', function(e){
