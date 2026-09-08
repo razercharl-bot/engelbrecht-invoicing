@@ -355,7 +355,7 @@
       markups: [100,125,150,175,200],
       defaultMarkup: 150,
       customMarkupAllowed: true,
-      defaultWastePct: 0,
+      defaultWasteGrams: 0,
       defaultPackaging: 0,
       defaultLabourOn: false,
       minimumMarginPct: 40
@@ -367,7 +367,7 @@
       calcType: 'single',              // 'plate' | 'single'
       unitsPerPlate: '', printTimePerPlate: '', printTimeHours: '',
       filamentGrams: {},               // materialId -> grams (per plate if calcType 'plate', else job total)
-      wastePct: spSettings.defaultWastePct, failureAllowancePct: 0,
+      wasteGrams: spSettings.defaultWasteGrams, failureAllowancePct: 0,
       labourEnabled: spSettings.defaultLabourOn, labourHours: '', labourRate: spSettings.defaultLabourRate,
       postProcessing: [],              // {description, hours, rate, amount}
       consumablesUsed: [],             // {consumableId, quantity}
@@ -409,16 +409,28 @@
     }
     var multiplier = isPlate ? plates : 1;
     var totalPrintHours = isPlate ? (printTimeUnit * plates) : printTimeUnit;
-    var wastePct = (Number(job.wastePct)||0) + (Number(job.failureAllowancePct)||0);
+    // Waste comes from the slicer in grams (not a %) — entered per plate in "per plate" mode,
+    // same as a filament colour's grams, so it scales with the plate count the same way.
+    // It's split across colours in proportion to how much of each colour the job actually uses.
+    var wasteGramsTotal = (Number(job.wasteGrams)||0) * multiplier;
+    var failureAllowancePct = Number(job.failureAllowancePct)||0;
 
-    var filamentLines = [], totalFilamentRawG = 0, totalFilamentCostedG = 0, filamentCost = 0;
+    var rawByMaterial = {}, totalRawG = 0;
     Object.keys(job.filamentGrams || {}).forEach(function(materialId){
       var rawEach = Number(job.filamentGrams[materialId]) || 0;
       if(!rawEach) return;
-      var mat = materialsById[materialId];
-      if(!mat) return;
+      if(!materialsById[materialId]) return;
       var rawTotal = rawEach * multiplier;
-      var costedTotal = rawTotal * (1 + wastePct/100);
+      rawByMaterial[materialId] = rawTotal;
+      totalRawG += rawTotal;
+    });
+
+    var filamentLines = [], totalFilamentRawG = 0, totalFilamentCostedG = 0, filamentCost = 0;
+    Object.keys(rawByMaterial).forEach(function(materialId){
+      var mat = materialsById[materialId];
+      var rawTotal = rawByMaterial[materialId];
+      var wasteShare = totalRawG > 0 ? wasteGramsTotal * (rawTotal / totalRawG) : 0;
+      var costedTotal = (rawTotal + wasteShare) * (1 + failureAllowancePct/100);
       var cost = (costedTotal/1000) * (Number(mat.pricePerKg)||0);
       totalFilamentRawG += rawTotal; totalFilamentCostedG += costedTotal; filamentCost += cost;
       filamentLines.push({materialId:materialId, colour:mat.colour, materialType:mat.materialType, grams:rawTotal, costedGrams:costedTotal, pricePerKg:Number(mat.pricePerKg)||0, cost:cost});
@@ -615,8 +627,8 @@
     return ref.limit(1).get().then(function(qs){
       if(!qs.empty) return;
       var seedPrinters = [
-        {id:'h2c', name:'H2C', manufacturer:'Bambu Lab', model:'H2C', purchasePrice:54964.25, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWastePct:0, active:true},
-        {id:'p2s', name:'P2S', manufacturer:'Bambu Lab', model:'P2S', purchasePrice:21999, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWastePct:3, active:true}
+        {id:'h2c', name:'H2C', manufacturer:'Bambu Lab', model:'H2C', purchasePrice:54964.25, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWasteGrams:0, active:true},
+        {id:'p2s', name:'P2S', manufacturer:'Bambu Lab', model:'P2S', purchasePrice:21999, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWasteGrams:5, active:true}
       ];
       var batch = firestore.batch();
       seedPrinters.forEach(function(p){ var id=p.id; var data=Object.assign({},p); delete data.id; batch.set(firestore.doc(userPath('printers')+'/'+id), data); });
@@ -1358,7 +1370,7 @@
       html += '</tbody></table></div>';
     }
     html += '<div class="field-row" style="margin-top:14px;">';
-    html += cField('calc-waste-pct','Waste (%)', calc.wastePct, {type:'number', step:'0.1'});
+    html += cField('calc-waste-grams','Waste (grams, from your slicer)', calc.wasteGrams, {type:'number', step:'0.1'});
     html += cField('calc-failure-pct','Failure allowance (%)', calc.failureAllowancePct, {type:'number', step:'0.1'});
     html += '</div>';
     html += '<div class="totals" style="margin-top:6px;">' +
@@ -1605,7 +1617,7 @@
     bindLight('calc-units-per-plate','unitsPerPlate');
     bindLight('calc-print-time-per-plate','printTimePerPlate');
     bindLight('calc-print-time-hours','printTimeHours');
-    bindLight('calc-waste-pct','wastePct');
+    bindLight('calc-waste-grams','wasteGrams');
     bindLight('calc-failure-pct','failureAllowancePct');
     bindLight('calc-labour-hours','labourHours');
     bindLight('calc-labour-rate','labourRate');
@@ -1620,7 +1632,7 @@
     if(printerSel) printerSel.addEventListener('change', function(){
       calc.printerId = this.value;
       var p = printers.find(function(x){return x.id===calc.printerId;});
-      calc.wastePct = p ? (Number(p.defaultWastePct)||0) : calc.wastePct;
+      calc.wasteGrams = p ? (Number(p.defaultWasteGrams)||0) : calc.wasteGrams;
       render();
     });
 
@@ -1771,7 +1783,7 @@
     ]);
     html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Allow a custom markup per job</span><label class="switch"><input type="checkbox" name="customMarkupAllowed" ' + (spSettings.customMarkupAllowed?'checked':'') + '><span class="track"></span><span class="thumb"></span></label></div>';
     html += fieldRow([
-      field('defaultWastePct','Default waste (%)', spSettings.defaultWastePct, 'text'),
+      field('defaultWasteGrams','Default waste (grams)', spSettings.defaultWasteGrams, 'text'),
       field('defaultPackaging','Default packaging cost (R)', spSettings.defaultPackaging, 'text')
     ]);
     html += fieldRow([
@@ -2566,7 +2578,7 @@
       });
     }
     else if(modal.type === 'printer'){
-      var pr = modal.editingId ? printers.find(function(x){return x.id===modal.editingId;}) : {name:'',manufacturer:'',model:'',purchasePrice:0,purchaseDate:todayISO(),powerWatts:200,expectedLifeHours:10000,maintenancePerHour:0,manualHourlyCost:0,useManualHourlyCost:false,defaultWastePct:0,active:true};
+      var pr = modal.editingId ? printers.find(function(x){return x.id===modal.editingId;}) : {name:'',manufacturer:'',model:'',purchasePrice:0,purchaseDate:todayISO(),powerWatts:200,expectedLifeHours:10000,maintenancePerHour:0,manualHourlyCost:0,useManualHourlyCost:false,defaultWasteGrams:0,active:true};
       root.innerHTML = '<div class="modal-backdrop" id="modal-backdrop"><div class="modal">' +
         '<h2>'+(modal.editingId?'Edit printer':'Add printer')+'</h2>' +
         '<form id="printer-form">' +
@@ -2574,7 +2586,7 @@
         fieldRow([field('p-manufacturer','Manufacturer', pr.manufacturer, 'text'), field('p-model','Model', pr.model, 'text')]) +
         fieldRow([field('p-purchase-price','Purchase price (R)', pr.purchasePrice, 'number'), field('p-purchase-date','Purchase date', pr.purchaseDate, 'date')]) +
         fieldRow([field('p-power','Power consumption (W)', pr.powerWatts, 'number'), field('p-life','Expected useful life (hours)', pr.expectedLifeHours, 'number')]) +
-        fieldRow([field('p-maintenance','Maintenance cost / hour (R)', pr.maintenancePerHour, 'number'), field('p-waste','Default waste for this printer (%)', pr.defaultWastePct, 'number')]) +
+        fieldRow([field('p-maintenance','Maintenance cost / hour (R)', pr.maintenancePerHour, 'number'), field('p-waste','Default waste for this printer (grams, from your slicer)', pr.defaultWasteGrams, 'number')]) +
         '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Use a manual hourly cost instead of calculating it</span><label class="switch"><input type="checkbox" id="p-manual-toggle" name="useManualHourlyCost" '+(pr.useManualHourlyCost?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
         '<div id="p-manual-cost-wrap" style="'+(pr.useManualHourlyCost?'':'display:none;')+'">' + field('p-manual-cost','Manual hourly cost (R / hour)', pr.manualHourlyCost, 'number') + '</div>' +
         '<div class="switch-row" style="margin-bottom:6px;"><span style="font-size:13.5px; font-weight:600;">Active</span><label class="switch"><input type="checkbox" name="active" '+(pr.active!==false?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
@@ -2596,7 +2608,7 @@
           name: fd.get('p-name')||'', manufacturer: fd.get('p-manufacturer')||'', model: fd.get('p-model')||'',
           purchasePrice: Number(fd.get('p-purchase-price'))||0, purchaseDate: fd.get('p-purchase-date')||'',
           powerWatts: Number(fd.get('p-power'))||0, expectedLifeHours: Number(fd.get('p-life'))||1,
-          maintenancePerHour: Number(fd.get('p-maintenance'))||0, defaultWastePct: Number(fd.get('p-waste'))||0,
+          maintenancePerHour: Number(fd.get('p-maintenance'))||0, defaultWasteGrams: Number(fd.get('p-waste'))||0,
           useManualHourlyCost: fd.get('useManualHourlyCost')==='on', manualHourlyCost: Number(fd.get('p-manual-cost'))||0,
           active: fd.get('active')==='on'
         };
@@ -2782,7 +2794,7 @@
         markups: markupsList,
         defaultMarkup: Number(pfd.get('defaultMarkup'))||markupsList[0],
         customMarkupAllowed: pfd.get('customMarkupAllowed') === 'on',
-        defaultWastePct: Number(pfd.get('defaultWastePct'))||0,
+        defaultWasteGrams: Number(pfd.get('defaultWasteGrams'))||0,
         defaultPackaging: Number(pfd.get('defaultPackaging'))||0,
         defaultLabourOn: pfd.get('defaultLabourOn') === 'on',
         minimumMarginPct: Number(pfd.get('minimumMarginPct'))||0
