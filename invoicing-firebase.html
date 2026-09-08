@@ -396,7 +396,10 @@
   }
   function blankPrinterSplitLeg(){
     var p = printers.find(function(x){ return x.active !== false; });
-    return { printerId: p ? p.id : '', quantity: 0, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: p ? (Number(p.defaultWasteGrams)||0) : 0 };
+    // filamentGrams is per THIS leg's printer — grams per unit, keyed by materialId — since
+    // the same part can use a different amount of filament (or a different colour entirely)
+    // depending on which machine actually prints it (nozzle, purge/prime behaviour, etc).
+    return { printerId: p ? p.id : '', quantity: 0, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: p ? (Number(p.defaultWasteGrams)||0) : 0, filamentGrams: {} };
   }
   /* Given a total quantity and each printer's plate size/time, works out how many units
      go on each printer so they finish around the same time (a classic parallel-machine
@@ -583,7 +586,6 @@
      filament/electricity/machine come back zero) rather than re-deriving any formula. */
   function computeSplitJobCost(job, printersById, materialsById, consumablesById, settings){
     var legs = (job.printerSplits && job.printerSplits.length) ? job.printerSplits : [blankPrinterSplitLeg()];
-    var gramsPerUnit = job.filamentGrams || {};
     var failureAllowancePct = Number(job.failureAllowancePct)||0;
 
     var legResults = legs.map(function(leg){
@@ -603,9 +605,13 @@
         };
       }
       var plates = Math.ceil(legQuantity / unitsPerPlate);
+      // Grams-per-unit are entered separately for THIS leg's own printer (leg.filamentGrams) —
+      // not shared across legs — since the H2C and P2S can genuinely use different amounts of
+      // the same material (or different materials/colours entirely) for the same part.
+      var legGramsPerUnit = leg.filamentGrams || {};
       var legFilamentGrams = {};
-      Object.keys(gramsPerUnit).forEach(function(mid){
-        var perUnit = Number(gramsPerUnit[mid])||0;
+      Object.keys(legGramsPerUnit).forEach(function(mid){
+        var perUnit = Number(legGramsPerUnit[mid])||0;
         if(perUnit) legFilamentGrams[mid] = perUnit * legQuantity;
       });
       var legJob = {
@@ -1803,9 +1809,30 @@
     /* ---- filament ---- */
     html += '<div class="card card-pad" style="margin-bottom:18px;">';
     html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament / materials</h3>';
-    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per UNIT — the same part uses the same material regardless of which printer makes it. Waste differs per printer, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.')) + ' Prices come from your Materials database.</p>';
+    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per unit, entered separately for each printer — the same part can use a different amount (or none) of a material depending on the machine. Waste differs per printer too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.')) + ' Prices come from your Materials database.</p>';
     if(!activeMaterials.length){
       html += '<p class="hint">No active materials yet — add one on the Materials tab.</p>';
+    } else if(calc.splitEnabled){
+      var splitLegsForFil = (calc.printerSplits && calc.printerSplits.length) ? calc.printerSplits : [blankPrinterSplitLeg()];
+      html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th>' +
+        splitLegsForFil.map(function(leg, i){
+          var p = printers.find(function(x){ return x.id === leg.printerId; });
+          return '<th>' + esc(p ? p.name : ('Printer ' + (i+1))) + ' (g/unit)</th>';
+        }).join('') +
+        '<th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
+      activeMaterials.forEach(function(m){
+        html += '<tr data-material-id="'+m.id+'">' +
+          '<td>' + esc(m.colour) + '</td>' +
+          '<td>' + esc(m.materialType||'—') + '</td>' +
+          splitLegsForFil.map(function(leg, i){
+            var g = (leg.filamentGrams && leg.filamentGrams[m.id]) || '';
+            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'" data-leg-idx="'+i+'"></td>';
+          }).join('') +
+          '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
+          '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
     } else {
       html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th><th>Grams</th><th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
       activeMaterials.forEach(function(m){
@@ -2171,9 +2198,10 @@
         leg.printerId = e.target.value;
         var p = printers.find(function(x){return x.id===leg.printerId;});
         leg.wasteGrams = p ? (Number(p.defaultWasteGrams)||0) : leg.wasteGrams;
-        var wasteInput = tr.querySelector('.calc-split-waste'); if(wasteInput) wasteInput.value = leg.wasteGrams;
         autoBalanceSplit();
-        updateCalcOutputs();
+        // Full re-render: the filament matrix's per-printer column header needs to pick up
+        // the new printer's name, not just the waste default and schedule.
+        render();
       });
     }
     var addSplitBtn = document.getElementById('calc-add-split-leg');
@@ -2204,7 +2232,15 @@
     if(filBody) filBody.addEventListener('input', function(e){
       if(!e.target.classList.contains('calc-fil-input')) return;
       var mid = e.target.getAttribute('data-material-id');
-      calc.filamentGrams[mid] = e.target.value;
+      var legIdxAttr = e.target.getAttribute('data-leg-idx');
+      if(legIdxAttr !== null){
+        // Split mode — this grams-per-unit value belongs to one specific printer leg.
+        var leg = calc.printerSplits[Number(legIdxAttr)]; if(!leg) return;
+        if(!leg.filamentGrams) leg.filamentGrams = {};
+        leg.filamentGrams[mid] = e.target.value;
+      } else {
+        calc.filamentGrams[mid] = e.target.value;
+      }
       updateCalcOutputs();
     });
 
