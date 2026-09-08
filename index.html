@@ -376,15 +376,24 @@
       jobName: '', clientId: '', quantity: 1, printerId: (printers[0] && printers[0].id) || '',
       calcType: 'single',              // 'plate' | 'single'
       unitsPerPlate: '', printTimePerPlate: '', printTimeHours: '',
-      filamentGrams: {},               // materialId -> grams (per plate if calcType 'plate', else job total)
+      filamentGrams: {},               // materialId -> grams (per plate if calcType 'plate', else job total;
+                                        // per UNIT when splitEnabled — see printerSplits below)
       wasteGrams: spSettings.defaultWasteGrams, failureAllowancePct: 0,
       labourEnabled: spSettings.defaultLabourOn, labourHours: '', labourRate: spSettings.defaultLabourRate,
       postProcessing: [],              // {description, hours, rate, amount}
       consumablesUsed: [],             // {consumableId, quantity}
       packagingAmount: spSettings.defaultPackaging,
       otherCosts: [],                  // {description, amount}
-      customPrice: '', rounding: 'none', roundingCustom: ''
+      customPrice: '', rounding: 'none', roundingCustom: '',
+      // Split a single order across more than one printer — e.g. a P2S and an H2C with
+      // different build plates — so each portion is costed against its own machine.
+      splitEnabled: false,
+      printerSplits: []                // {printerId, quantity, unitsPerPlate, printTimePerPlate, wasteGrams}
     };
+  }
+  function blankPrinterSplitLeg(){
+    var p = printers.find(function(x){ return x.active !== false; });
+    return { printerId: p ? p.id : '', quantity: 1, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: p ? (Number(p.defaultWasteGrams)||0) : 0 };
   }
   function printerMachineRate(printer){
     if(!printer) return {depreciationPerHour:0, maintenancePerHour:0, hourlyRate:0};
@@ -473,7 +482,25 @@
 
     var totalCost = filamentCost + electricityCost + machineCost + labourCost + postProcessingCost + consumablesCost + packagingCost + otherCost;
     var costPerUnit = totalCost / quantity;
+    var pricing = deriveMarkupsAndStatus(costPerUnit, quantity, job, settings);
 
+    return {
+      quantity: quantity, plates: plates, isPlate: isPlate, totalPrintHours: totalPrintHours,
+      totalFilamentRawG: totalFilamentRawG, totalFilamentCostedG: totalFilamentCostedG,
+      filamentLines: filamentLines, filamentCost: filamentCost,
+      electricityCost: electricityCost, electricityRate: electricityRate, powerKw: powerKw,
+      machineCost: machineCost, machineHourlyRate: mc.hourlyRate, depreciationPerHour: mc.depreciationPerHour, maintenancePerHour: mc.maintenancePerHour,
+      labourCost: labourCost, postProcessingCost: postProcessingCost,
+      consumablesLines: consumablesLines, consumablesCost: consumablesCost,
+      packagingCost: packagingCost, otherCost: otherCost,
+      totalCost: totalCost, costPerUnit: costPerUnit,
+      markupRows: pricing.markupRows, customPrice: pricing.customPrice, activeSelection: pricing.activeSelection,
+      breakEvenPerUnit: costPerUnit, minMargin: pricing.minMargin, status: pricing.status
+    };
+  }
+  /* Shared by computeJobCost and computeSplitJobCost so markup/margin/break-even math
+     lives in exactly one place, whichever costing path produced costPerUnit. */
+  function deriveMarkupsAndStatus(costPerUnit, quantity, job, settings){
     var markups = (settings.markups && settings.markups.length) ? settings.markups : [100,125,150,175,200];
     var markupRows = markups.map(function(pct){
       var raw = costPerUnit * (1 + pct/100);
@@ -506,24 +533,103 @@
     if(activeSelection.priceUnit > 0 && activeSelection.marginPct >= minMargin) status = 'green';
     else if(activeSelection.marginPct > 0) status = 'yellow';
 
+    return { markupRows: markupRows, customPrice: customPrice, activeSelection: activeSelection, minMargin: minMargin, status: status };
+  }
+  /* Splits one order across several printers (e.g. a P2S and an H2C with different build
+     plates) and costs each portion against its own machine, then combines them into one
+     accurate total. Order-level costs (labour, post-processing, consumables, packaging,
+     other) are shared once across the whole order rather than duplicated per printer.
+     Reuses computeJobCost per leg (and once for the order-level costs, with printer:null so
+     filament/electricity/machine come back zero) rather than re-deriving any formula. */
+  function computeSplitJobCost(job, printersById, materialsById, consumablesById, settings){
+    var legs = (job.printerSplits && job.printerSplits.length) ? job.printerSplits : [blankPrinterSplitLeg()];
+    var gramsPerUnit = job.filamentGrams || {};
+    var failureAllowancePct = Number(job.failureAllowancePct)||0;
+
+    var legResults = legs.map(function(leg){
+      var printer = printersById[leg.printerId] || null;
+      var legQuantity = Math.max(1, Number(leg.quantity)||1);
+      var unitsPerPlate = Math.max(1, Number(leg.unitsPerPlate)||1);
+      var plates = Math.ceil(legQuantity / unitsPerPlate);
+      var legFilamentGrams = {};
+      Object.keys(gramsPerUnit).forEach(function(mid){
+        var perUnit = Number(gramsPerUnit[mid])||0;
+        if(perUnit) legFilamentGrams[mid] = perUnit * legQuantity;
+      });
+      var legJob = {
+        calcType: 'single', quantity: legQuantity, filamentGrams: legFilamentGrams,
+        wasteGrams: (Number(leg.wasteGrams)||0) * plates, failureAllowancePct: failureAllowancePct,
+        printTimeHours: plates * (Number(leg.printTimePerPlate)||0),
+        labourEnabled: false, postProcessing: [], consumablesUsed: [], packagingAmount: 0, otherCosts: [],
+        customPrice: '', rounding: 'none', roundingCustom: ''
+      };
+      var r = computeJobCost(legJob, printer, materialsById, {}, settings);
+      return {
+        printerId: leg.printerId, printerName: printer ? printer.name : '(no printer selected)',
+        quantity: legQuantity, unitsPerPlate: unitsPerPlate, plates: plates,
+        printTimePerPlate: Number(leg.printTimePerPlate)||0, totalPrintHours: r.totalPrintHours,
+        wasteGramsPerPlate: Number(leg.wasteGrams)||0,
+        filamentLines: r.filamentLines, filamentCost: r.filamentCost,
+        electricityCost: r.electricityCost, machineCost: r.machineCost, machineHourlyRate: r.machineHourlyRate
+      };
+    });
+
+    var orderLevelJob = {
+      calcType: 'single', quantity: 1, filamentGrams: {}, wasteGrams: 0, failureAllowancePct: 0, printTimeHours: 0,
+      labourEnabled: !!job.labourEnabled, labourHours: job.labourHours, labourRate: job.labourRate,
+      postProcessing: job.postProcessing, consumablesUsed: job.consumablesUsed, packagingAmount: job.packagingAmount, otherCosts: job.otherCosts,
+      customPrice: '', rounding: 'none', roundingCustom: ''
+    };
+    var orderR = computeJobCost(orderLevelJob, null, materialsById, consumablesById, settings);
+
+    var quantity = legResults.reduce(function(s,l){ return s + l.quantity; }, 0) || 1;
+    var totalPrintHours = legResults.reduce(function(s,l){ return s + l.totalPrintHours; }, 0);
+    var filamentCost = legResults.reduce(function(s,l){ return s + l.filamentCost; }, 0);
+    var electricityCost = legResults.reduce(function(s,l){ return s + l.electricityCost; }, 0);
+    var machineCost = legResults.reduce(function(s,l){ return s + l.machineCost; }, 0);
+
+    var filamentLinesById = {};
+    legResults.forEach(function(leg){
+      leg.filamentLines.forEach(function(l){
+        var existing = filamentLinesById[l.materialId];
+        if(existing){
+          existing.grams += l.grams; existing.costedGrams += l.costedGrams; existing.cost += l.cost;
+        } else {
+          filamentLinesById[l.materialId] = { materialId:l.materialId, colour:l.colour, materialType:l.materialType, grams:l.grams, costedGrams:l.costedGrams, pricePerKg:l.pricePerKg, cost:l.cost };
+        }
+      });
+    });
+    var filamentLines = Object.keys(filamentLinesById).map(function(k){ return filamentLinesById[k]; });
+    var totalFilamentRawG = filamentLines.reduce(function(s,l){ return s + l.grams; }, 0);
+    var totalFilamentCostedG = filamentLines.reduce(function(s,l){ return s + l.costedGrams; }, 0);
+
+    var totalCost = filamentCost + electricityCost + machineCost + orderR.labourCost + orderR.postProcessingCost + orderR.consumablesCost + orderR.packagingCost + orderR.otherCost;
+    var costPerUnit = totalCost / quantity;
+    var pricing = deriveMarkupsAndStatus(costPerUnit, quantity, job, settings);
+
     return {
-      quantity: quantity, plates: plates, isPlate: isPlate, totalPrintHours: totalPrintHours,
+      isSplit: true, legs: legResults,
+      quantity: quantity, plates: legResults.reduce(function(s,l){ return s + l.plates; }, 0), isPlate: true, totalPrintHours: totalPrintHours,
       totalFilamentRawG: totalFilamentRawG, totalFilamentCostedG: totalFilamentCostedG,
       filamentLines: filamentLines, filamentCost: filamentCost,
-      electricityCost: electricityCost, electricityRate: electricityRate, powerKw: powerKw,
-      machineCost: machineCost, machineHourlyRate: mc.hourlyRate, depreciationPerHour: mc.depreciationPerHour, maintenancePerHour: mc.maintenancePerHour,
-      labourCost: labourCost, postProcessingCost: postProcessingCost,
-      consumablesLines: consumablesLines, consumablesCost: consumablesCost,
-      packagingCost: packagingCost, otherCost: otherCost,
+      electricityCost: electricityCost, electricityRate: Number(settings.electricityRate)||0, powerKw: 0,
+      machineCost: machineCost, machineHourlyRate: 0, depreciationPerHour: 0, maintenancePerHour: 0,
+      labourCost: orderR.labourCost, postProcessingCost: orderR.postProcessingCost,
+      consumablesLines: orderR.consumablesLines, consumablesCost: orderR.consumablesCost,
+      packagingCost: orderR.packagingCost, otherCost: orderR.otherCost,
       totalCost: totalCost, costPerUnit: costPerUnit,
-      markupRows: markupRows, customPrice: customPrice, activeSelection: activeSelection,
-      breakEvenPerUnit: costPerUnit, minMargin: minMargin, status: status
+      markupRows: pricing.markupRows, customPrice: pricing.customPrice, activeSelection: pricing.activeSelection,
+      breakEvenPerUnit: costPerUnit, minMargin: pricing.minMargin, status: pricing.status
     };
   }
   function calcMaterialsById(){ var m={}; materials.forEach(function(x){ m[x.id]=x; }); return m; }
   function calcConsumablesById(){ var m={}; consumables.forEach(function(x){ m[x.id]=x; }); return m; }
+  function calcPrintersById(){ var m={}; printers.forEach(function(x){ m[x.id]=x; }); return m; }
   function calcResult(){
     if(!calc) calc = blankCalc();
+    if(calc.splitEnabled){
+      return computeSplitJobCost(calc, calcPrintersById(), calcMaterialsById(), calcConsumablesById(), spSettings);
+    }
     var printer = printers.find(function(p){ return p.id === calc.printerId; }) || null;
     return computeJobCost(calc, printer, calcMaterialsById(), calcConsumablesById(), spSettings);
   }
@@ -543,6 +649,7 @@
     var chosen = r.activeSelection;
     var usingCustom = calc.customPrice !== '' && calc.customPrice != null;
     var defaultRow = r.markupRows.filter(function(x){ return x.pct === Number(spSettings.defaultMarkup); })[0] || r.markupRows[0];
+    var isSplit = !!calc.splitEnabled;
     return {
       quoteDate: todayISO(), validUntil: addDays(todayISO(), 14),
       clientId: calc.clientId || '',
@@ -551,8 +658,19 @@
       jobName: (calc.jobName || '').trim() || '3D printing job',
       calcType: calc.calcType, quantity: r.quantity, unitsPerPlate: Number(calc.unitsPerPlate)||0, plates: r.plates,
       printTimePerPlate: Number(calc.printTimePerPlate)||0, printTimeHours: Number(calc.printTimeHours)||0, totalPrintHours: r.totalPrintHours,
-      printerId: calc.printerId || '',
-      printerSnapshot: printer ? {name:printer.name, manufacturer:printer.manufacturer, model:printer.model, powerWatts:Number(printer.powerWatts)||0, useManualHourlyCost:!!printer.useManualHourlyCost, manualHourlyCost:Number(printer.manualHourlyCost)||0, depreciationPerHour:r.depreciationPerHour, maintenancePerHour:r.maintenancePerHour, hourlyRate:r.machineHourlyRate} : null,
+      isSplit: isSplit,
+      printerId: isSplit ? '' : (calc.printerId || ''),
+      printerSnapshot: (!isSplit && printer) ? {name:printer.name, manufacturer:printer.manufacturer, model:printer.model, powerWatts:Number(printer.powerWatts)||0, useManualHourlyCost:!!printer.useManualHourlyCost, manualHourlyCost:Number(printer.manualHourlyCost)||0, depreciationPerHour:r.depreciationPerHour, maintenancePerHour:r.maintenancePerHour, hourlyRate:r.machineHourlyRate} : null,
+      // Frozen per-printer breakdown (only when isSplit) — what each machine actually
+      // contributed, for the quote's own display and for the Dashboard's per-printer
+      // utilisation, which attributes totalPrintHours back to the right printer.
+      legs: isSplit ? r.legs.map(function(l){ return {
+        printerId: l.printerId, printerName: l.printerName, quantity: l.quantity, unitsPerPlate: l.unitsPerPlate,
+        plates: l.plates, printTimePerPlate: l.printTimePerPlate, totalPrintHours: l.totalPrintHours,
+        wasteGramsPerPlate: l.wasteGramsPerPlate, filamentCost: l.filamentCost, electricityCost: l.electricityCost,
+        machineCost: l.machineCost, machineHourlyRate: l.machineHourlyRate
+      }; }) : [],
+      printerSplitsInput: isSplit ? JSON.parse(JSON.stringify(calc.printerSplits || [])) : [],
       filamentLines: r.filamentLines, filamentGramsInput: JSON.parse(JSON.stringify(calc.filamentGrams || {})),
       wasteGrams: Number(calc.wasteGrams)||0, failureAllowancePct: Number(calc.failureAllowancePct)||0,
       totalFilamentRawG: r.totalFilamentRawG, totalFilamentCostedG: r.totalFilamentCostedG, filamentCost: r.filamentCost,
@@ -647,7 +765,9 @@
       packagingAmount: q.packagingCost || 0,
       otherCosts: JSON.parse(JSON.stringify(q.otherCosts||[])),
       customPrice: q.customPriceUsed ? String(q.sellingPricePerUnit) : '',
-      rounding: q.rounding || 'none', roundingCustom: q.roundingCustom || ''
+      rounding: q.rounding || 'none', roundingCustom: q.roundingCustom || '',
+      splitEnabled: !!q.isSplit,
+      printerSplits: q.isSplit ? JSON.parse(JSON.stringify(q.printerSplitsInput||[])) : []
     };
   }
   function editQuoteInCalculator(q){
@@ -1236,8 +1356,16 @@
 
     var activePrinters = printers.filter(function(p){ return p.active !== false; });
     var totalCapacity = activePrinters.reduce(function(s,p){ return s + (Number(p.capacityHoursPerMonth)||0); }, 0);
-    var bookedHours = thisMonthQuotes.filter(function(q){ return q.status !== 'Cancelled'; })
-      .reduce(function(s,q){ return s + (Number(q.totalPrintHours)||0); }, 0);
+    var nonCancelledThisMonth = thisMonthQuotes.filter(function(q){ return q.status !== 'Cancelled'; });
+    var hoursByPrinter = {};
+    nonCancelledThisMonth.forEach(function(q){
+      if(q.isSplit){
+        (q.legs||[]).forEach(function(l){ hoursByPrinter[l.printerId] = (hoursByPrinter[l.printerId]||0) + (Number(l.totalPrintHours)||0); });
+      } else if(q.printerId){
+        hoursByPrinter[q.printerId] = (hoursByPrinter[q.printerId]||0) + (Number(q.totalPrintHours)||0);
+      }
+    });
+    var bookedHours = Object.keys(hoursByPrinter).reduce(function(s,k){ return s + hoursByPrinter[k]; }, 0);
     var utilisationPct = totalCapacity > 0 ? Math.min(999, (bookedHours / totalCapacity) * 100) : 0;
 
     var recentQuotes = spQuotes.slice(0,5);
@@ -1253,6 +1381,18 @@
       statCard('Profit', fmtMoney(profitThisMonth), profitThisMonth>=0?'':'warn') +
       statCard('Printer utilisation', totalCapacity>0 ? utilisationPct.toFixed(0)+'%' : '—', utilisationPct>90?'warn':'') +
       '</div>';
+
+    if(activePrinters.length > 1){
+      html += '<div class="table-wrap" style="margin-bottom:18px;"><table><thead><tr><th>Printer</th><th class="num-cell">Booked hours</th><th class="num-cell">Capacity</th><th class="num-cell">Utilisation</th></tr></thead><tbody>';
+      activePrinters.forEach(function(p){
+        var booked = hoursByPrinter[p.id] || 0;
+        var capacity = Number(p.capacityHoursPerMonth)||0;
+        var pct = capacity > 0 ? (booked/capacity*100) : 0;
+        html += '<tr><td>'+esc(p.name)+'</td><td class="num-cell">'+booked.toFixed(1)+'</td><td class="num-cell">'+(capacity||'—')+'</td>' +
+          '<td class="num-cell"><span class="badge '+(pct>90?'badge-overdue':(pct>0?'badge-paid':'badge-draft'))+'">'+(capacity>0?pct.toFixed(0)+'%':'—')+'</span></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
 
     if(!recentQuotes.length){
       html += emptyState('🧾','No quotes yet','Build a job in the Calculator and save it as a quote to see it here.', [
@@ -1526,42 +1666,77 @@
       clients.map(function(cl){ return '<option value="'+cl.id+'"'+(calc.clientId===cl.id?' selected':'')+'>'+esc(cl.name)+(cl.company?' — '+esc(cl.company):'')+'</option>'; }).join('') +
       '</select></div>';
     html += '</div>';
-    html += '<div class="field-row">';
-    html += cField('calc-quantity','Quantity', calc.quantity, {type:'number', step:'1'});
-    html += '<div class="field"><label>Printer</label><select id="calc-printer">' +
-      (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(calc.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') +
-      '</select></div>';
-    html += '</div>';
-    html += '<div class="field"><label>Calculation type</label><select id="calc-calctype" style="max-width:260px;">' +
-      '<option value="single"'+(calc.calcType==='single'?' selected':'')+'>Single job</option>' +
-      '<option value="plate"'+(calc.calcType==='plate'?' selected':'')+'>Per plate (bulk production)</option>' +
-      '</select></div>';
-    html += '</div>';
-
-    /* ---- production ---- */
-    html += '<div class="card card-pad" style="margin-bottom:18px;">';
-    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Production</h3>';
-    if(calc.calcType === 'plate'){
+    html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Split this job across more than one printer<br><span style="font-weight:400; color:var(--ink-faint); font-size:12px;">Different printers, different build plates — cost each portion against its own machine.</span></span><label class="switch"><input type="checkbox" id="calc-split-enabled" '+(calc.splitEnabled?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>';
+    if(!calc.splitEnabled){
       html += '<div class="field-row">';
-      html += cField('calc-units-per-plate','Units per plate', calc.unitsPerPlate, {type:'number', step:'1', placeholder:'e.g. 18'});
-      html += '<div class="field"><label>Number of plates <span style="font-weight:400; color:var(--ink-faint);">— auto</span></label><input type="text" value="'+r.plates+'" readonly id="calc-out-plates"></div>';
+      html += cField('calc-quantity','Quantity', calc.quantity, {type:'number', step:'1'});
+      html += '<div class="field"><label>Printer</label><select id="calc-printer">' +
+        (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(calc.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') +
+        '</select></div>';
       html += '</div>';
-      html += '<div class="field-row">';
-      html += cField('calc-print-time-per-plate','Print time per plate (hours)', calc.printTimePerPlate, {type:'number', step:'0.01', placeholder:'e.g. 3.5'});
-      html += '<div class="field"><label>Total production time</label><input type="text" value="'+r.totalPrintHours.toFixed(2)+' hours" readonly id="calc-out-total-hours"></div>';
-      html += '</div>';
-    } else {
-      html += '<div class="field-row">';
-      html += cField('calc-print-time-hours','Print time (hours)', calc.printTimeHours, {type:'number', step:'0.01', placeholder:'e.g. 7.9'});
-      html += '<div class="field"><label>Total production time</label><input type="text" value="'+r.totalPrintHours.toFixed(2)+' hours" readonly id="calc-out-total-hours"></div>';
-      html += '</div>';
+      html += '<div class="field"><label>Calculation type</label><select id="calc-calctype" style="max-width:260px;">' +
+        '<option value="single"'+(calc.calcType==='single'?' selected':'')+'>Single job</option>' +
+        '<option value="plate"'+(calc.calcType==='plate'?' selected':'')+'>Per plate (bulk production)</option>' +
+        '</select></div>';
     }
     html += '</div>';
+
+    if(calc.splitEnabled){
+      /* ---- printer split ---- */
+      html += '<div class="card card-pad" style="margin-bottom:18px;">';
+      html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Printer split</h3>';
+      html += '<p class="hint" style="margin-bottom:12px;">Each row is a batch on one printer — its own build plate size, print time and waste. Quantity, plates and hours below are the total across every row.</p>';
+      if(!activePrinters.length){
+        html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
+      } else {
+        html += '<div class="table-wrap"><table><thead><tr><th>Printer</th><th>Quantity</th><th>Units / plate</th><th>Plates</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th></th></tr></thead><tbody id="calc-split-body">';
+        (calc.printerSplits && calc.printerSplits.length ? calc.printerSplits : (calc.printerSplits = [blankPrinterSplitLeg()])).forEach(function(leg, i){
+          var legPlates = Math.ceil(Math.max(1,Number(leg.quantity)||1) / Math.max(1,Number(leg.unitsPerPlate)||1));
+          html += '<tr data-idx="'+i+'">' +
+            '<td><select class="calc-split-printer" style="min-width:110px;">' + activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(leg.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></td>' +
+            '<td><input class="calc-split-qty mono" type="number" min="1" step="1" style="width:80px;" value="'+(leg.quantity||1)+'"></td>' +
+            '<td><input class="calc-split-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(leg.unitsPerPlate||1)+'"></td>' +
+            '<td class="num-cell mono" data-split-plates>'+legPlates+'</td>' +
+            '<td><input class="calc-split-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(leg.printTimePerPlate)+'"></td>' +
+            '<td><input class="calc-split-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(leg.wasteGrams)+'"></td>' +
+            '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-split-leg data-idx="'+i+'">✕</button></td>' +
+            '</tr>';
+        });
+        html += '</tbody></table></div>';
+        html += '<button type="button" class="btn btn-sm" id="calc-add-split-leg" style="margin-top:8px;">+ Add printer</button>';
+      }
+      html += '<div class="totals" style="margin-top:14px; max-width:360px;">' +
+        '<div class="totals-row"><span>Total quantity</span><span class="mono" id="calc-split-out-qty">'+r.quantity+'</span></div>' +
+        '<div class="totals-row"><span>Total plates</span><span class="mono" id="calc-split-out-plates">'+r.plates+'</span></div>' +
+        '<div class="totals-row total"><span>Total print hours (all printers)</span><span class="mono" id="calc-split-out-hours">'+r.totalPrintHours.toFixed(2)+'</span></div>' +
+        '</div>';
+      html += '</div>';
+    } else {
+      /* ---- production ---- */
+      html += '<div class="card card-pad" style="margin-bottom:18px;">';
+      html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Production</h3>';
+      if(calc.calcType === 'plate'){
+        html += '<div class="field-row">';
+        html += cField('calc-units-per-plate','Units per plate', calc.unitsPerPlate, {type:'number', step:'1', placeholder:'e.g. 18'});
+        html += '<div class="field"><label>Number of plates <span style="font-weight:400; color:var(--ink-faint);">— auto</span></label><input type="text" value="'+r.plates+'" readonly id="calc-out-plates"></div>';
+        html += '</div>';
+        html += '<div class="field-row">';
+        html += cField('calc-print-time-per-plate','Print time per plate (hours)', calc.printTimePerPlate, {type:'number', step:'0.01', placeholder:'e.g. 3.5'});
+        html += '<div class="field"><label>Total production time</label><input type="text" value="'+r.totalPrintHours.toFixed(2)+' hours" readonly id="calc-out-total-hours"></div>';
+        html += '</div>';
+      } else {
+        html += '<div class="field-row">';
+        html += cField('calc-print-time-hours','Print time (hours)', calc.printTimeHours, {type:'number', step:'0.01', placeholder:'e.g. 7.9'});
+        html += '<div class="field"><label>Total production time</label><input type="text" value="'+r.totalPrintHours.toFixed(2)+' hours" readonly id="calc-out-total-hours"></div>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
 
     /* ---- filament ---- */
     html += '<div class="card card-pad" style="margin-bottom:18px;">';
     html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament / materials</h3>';
-    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.') + ' Prices come from your Materials database.</p>';
+    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per UNIT — the same part uses the same material regardless of which printer makes it. Waste differs per printer, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.')) + ' Prices come from your Materials database.</p>';
     if(!activeMaterials.length){
       html += '<p class="hint">No active materials yet — add one on the Materials tab.</p>';
     } else {
@@ -1579,7 +1754,7 @@
       html += '</tbody></table></div>';
     }
     html += '<div class="field-row" style="margin-top:14px;">';
-    html += cField('calc-waste-grams','Waste (grams, from your slicer)', calc.wasteGrams, {type:'number', step:'0.1'});
+    if(!calc.splitEnabled) html += cField('calc-waste-grams','Waste (grams, from your slicer)', calc.wasteGrams, {type:'number', step:'0.1'});
     html += cField('calc-failure-pct','Failure allowance (%)', calc.failureAllowancePct, {type:'number', step:'0.1'});
     html += '</div>';
     html += '<div class="totals" style="margin-top:6px;">' +
@@ -1754,6 +1929,9 @@
 
     var platesEl = document.getElementById('calc-out-plates'); if(platesEl) platesEl.value = String(r.plates);
     var hoursEl = document.getElementById('calc-out-total-hours'); if(hoursEl) hoursEl.value = r.totalPrintHours.toFixed(2) + ' hours';
+    set('calc-split-out-qty', String(r.quantity));
+    set('calc-split-out-plates', String(r.plates));
+    set('calc-split-out-hours', r.totalPrintHours.toFixed(2));
 
     var costByMaterial = {};
     r.filamentLines.forEach(function(l){ costByMaterial[l.materialId] = l.cost; });
@@ -1856,6 +2034,49 @@
 
     var calcTypeSel = document.getElementById('calc-calctype');
     if(calcTypeSel) calcTypeSel.addEventListener('change', function(){ calc.calcType = this.value; render(); });
+
+    var splitToggle = document.getElementById('calc-split-enabled');
+    if(splitToggle) splitToggle.addEventListener('change', function(){
+      calc.splitEnabled = this.checked;
+      if(calc.splitEnabled && (!calc.printerSplits || !calc.printerSplits.length)) calc.printerSplits = [blankPrinterSplitLeg()];
+      render();
+    });
+
+    var splitBody = document.getElementById('calc-split-body');
+    if(splitBody){
+      splitBody.addEventListener('input', function(e){
+        var tr = e.target.closest('tr'); if(!tr) return;
+        var idx = Number(tr.getAttribute('data-idx'));
+        var leg = calc.printerSplits[idx]; if(!leg) return;
+        if(e.target.classList.contains('calc-split-qty')) leg.quantity = e.target.value;
+        else if(e.target.classList.contains('calc-split-upp')) leg.unitsPerPlate = e.target.value;
+        else if(e.target.classList.contains('calc-split-time')) leg.printTimePerPlate = e.target.value;
+        else if(e.target.classList.contains('calc-split-waste')) leg.wasteGrams = e.target.value;
+        var platesCell = tr.querySelector('[data-split-plates]');
+        if(platesCell) platesCell.textContent = String(Math.ceil(Math.max(1,Number(leg.quantity)||1) / Math.max(1,Number(leg.unitsPerPlate)||1)));
+        updateCalcOutputs();
+      });
+      splitBody.addEventListener('change', function(e){
+        if(!e.target.classList.contains('calc-split-printer')) return;
+        var tr = e.target.closest('tr'); var idx = Number(tr.getAttribute('data-idx'));
+        var leg = calc.printerSplits[idx]; if(!leg) return;
+        leg.printerId = e.target.value;
+        var p = printers.find(function(x){return x.id===leg.printerId;});
+        leg.wasteGrams = p ? (Number(p.defaultWasteGrams)||0) : leg.wasteGrams;
+        var wasteInput = tr.querySelector('.calc-split-waste'); if(wasteInput) wasteInput.value = leg.wasteGrams;
+        updateCalcOutputs();
+      });
+    }
+    var addSplitBtn = document.getElementById('calc-add-split-leg');
+    if(addSplitBtn) addSplitBtn.addEventListener('click', function(){ calc.printerSplits.push(blankPrinterSplitLeg()); render(); });
+    document.querySelectorAll('[data-remove-split-leg]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var idx = Number(btn.getAttribute('data-idx'));
+        calc.printerSplits.splice(idx,1);
+        if(!calc.printerSplits.length) calc.printerSplits.push(blankPrinterSplitLeg());
+        render();
+      });
+    });
 
     var roundingSel = document.getElementById('calc-rounding');
     if(roundingSel) roundingSel.addEventListener('change', function(){ calc.rounding = this.value; render(); });
@@ -1971,11 +2192,20 @@
     if(!c) return '—';
     return c.company ? (c.name + ' · ' + c.company) : c.name;
   }
+  function spQuoteUsesPrinter(q, printerId){
+    if(!printerId) return true;
+    if(q.isSplit) return (q.legs||[]).some(function(l){ return l.printerId === printerId; });
+    return q.printerId === printerId;
+  }
+  function spQuotePrinterLabel(q){
+    if(q.isSplit) return (q.legs||[]).map(function(l){ return l.printerName; }).join(' + ') || 'Split';
+    return q.printerSnapshot ? q.printerSnapshot.name : '—';
+  }
   function filteredSpQuotes(){
     return spQuotes.filter(function(q){
       if(quoteFilter.status && q.status !== quoteFilter.status) return false;
       if(quoteFilter.clientId && q.clientId !== quoteFilter.clientId) return false;
-      if(quoteFilter.printerId && q.printerId !== quoteFilter.printerId) return false;
+      if(quoteFilter.printerId && !spQuoteUsesPrinter(q, quoteFilter.printerId)) return false;
       if(quoteFilter.from && q.quoteDate < quoteFilter.from) return false;
       if(quoteFilter.to && q.quoteDate > quoteFilter.to) return false;
       if(quoteFilter.minProfit !== '' && quoteFilter.minProfit != null && Number(q.profit) < Number(quoteFilter.minProfit)) return false;
@@ -2018,7 +2248,7 @@
         {label:'Open Calculator', nav:'calculator', primary:true}
       ]);
     } else {
-      html += '<div class="table-wrap"><table><thead><tr><th>Quote #</th><th>Date</th><th>Customer</th><th>Job</th>' +
+      html += '<div class="table-wrap"><table><thead><tr><th>Quote #</th><th>Date</th><th>Customer</th><th>Job</th><th>Printer</th>' +
         '<th class="num-cell">Qty</th><th class="num-cell">Cost</th><th class="num-cell">Selling price</th><th class="num-cell">Profit</th><th>Status</th></tr></thead><tbody>';
       list.forEach(function(q){
         html += '<tr class="row-link" data-nav="spQuoteView" data-id="'+q.id+'">' +
@@ -2026,6 +2256,7 @@
           '<td>'+fmtDate(q.quoteDate)+'</td>' +
           '<td>'+esc(spQuoteClientLabel(q))+'</td>' +
           '<td>'+esc(q.jobName)+'</td>' +
+          '<td>'+esc(spQuotePrinterLabel(q))+'</td>' +
           '<td class="num-cell">'+q.quantity+'</td>' +
           '<td class="num-cell">'+fmtMoney(q.totalCost)+'</td>' +
           '<td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td>' +
@@ -2129,7 +2360,19 @@
     });
     html += '<tr><td><strong>Total cost</strong></td><td class="num-cell"><strong>'+fmtMoney(q.totalCost)+'</strong></td></tr>';
     html += '</tbody></table></div>';
-    html += '<p class="hint" style="margin-top:10px;">Printer: '+esc(q.printerSnapshot ? q.printerSnapshot.name : '—')+' · '+q.totalPrintHours.toFixed(2)+' print hours · '+(q.plates>1?(q.plates+' plates · '):'')+'Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
+    if(q.isSplit && q.legs && q.legs.length){
+      html += '<h4 style="font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:18px 0 10px;">Split across '+q.legs.length+' printers</h4>';
+      html += '<div class="table-wrap"><table><thead><tr><th>Printer</th><th class="num-cell">Qty</th><th class="num-cell">Plates</th><th class="num-cell">Hours</th><th class="num-cell">Filament</th><th class="num-cell">Electricity</th><th class="num-cell">Machine</th></tr></thead><tbody>';
+      q.legs.forEach(function(l){
+        html += '<tr><td>'+esc(l.printerName)+'</td><td class="num-cell">'+l.quantity+'</td><td class="num-cell">'+l.plates+'</td>' +
+          '<td class="num-cell">'+l.totalPrintHours.toFixed(2)+'</td><td class="num-cell">'+fmtMoney(l.filamentCost)+'</td>' +
+          '<td class="num-cell">'+fmtMoney(l.electricityCost)+'</td><td class="num-cell">'+fmtMoney(l.machineCost)+'</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      html += '<p class="hint" style="margin-top:10px;">'+q.totalPrintHours.toFixed(2)+' total print hours across '+q.legs.length+' printers · '+q.plates+' plates total · Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
+    } else {
+      html += '<p class="hint" style="margin-top:10px;">Printer: '+esc(q.printerSnapshot ? q.printerSnapshot.name : '—')+' · '+q.totalPrintHours.toFixed(2)+' print hours · '+(q.plates>1?(q.plates+' plates · '):'')+'Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
+    }
     html += '</div>';
 
     return html;
