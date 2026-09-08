@@ -1361,6 +1361,7 @@
     {name:'dashboard', label:'Dashboard'},
     {name:'calculator', label:'Calculator'},
     {name:'spquotes', label:'Quotes'},
+    {name:'spinvoices', label:'Invoices'},
     {name:'worksheet', label:'Work Sheet'},
     {name:'printers', label:'Printers'},
     {name:'materials', label:'Materials'},
@@ -1399,6 +1400,7 @@
       case 'calculator': html += renderCalculator(); break;
       case 'spquotes': html += renderSpQuotes(); break;
       case 'spQuoteView': html += renderSpQuoteView(); break;
+      case 'spinvoices': html += renderSpInvoices(); break;
       case 'worksheet': html += renderWorkSheet(); break;
       case 'reports': html += renderReports(); break;
       case 'reportBuilder': html += renderReportBuilder(); break;
@@ -1422,7 +1424,8 @@
     var showTabs = connectState === 'signed-in' && workspace;
     var TABS = workspace === 'sp' ? TABS_SP : TABS_CE;
     t.innerHTML = !showTabs ? '' : TABS.map(function(tb){
-      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name==='documents') || (view.name==='reportBuilder' && tb.name==='reports') || (view.name==='spQuoteView' && tb.name==='spquotes');
+      var viewDocTab = workspace==='sp' ? 'spinvoices' : 'documents';
+      var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name===viewDocTab) || (view.name==='reportBuilder' && tb.name==='reports') || (view.name==='spQuoteView' && tb.name==='spquotes');
       return '<button class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '">' + tb.label + '</button>';
     }).join('');
 
@@ -2650,6 +2653,17 @@
       '</div>';
 
     if(q.notes) html += '<div class="sheet-notes">'+esc(q.notes)+'</div>';
+
+    if(business.bankName || business.accountNumber){
+      html += '<div class="sheet-pay"><div class="label">Payment details</div>' +
+        (business.bankName? esc(business.bankName)+'<br>':'') +
+        (business.accountHolder? 'Account holder: '+esc(business.accountHolder)+'<br>':'') +
+        (business.accountNumber? 'Account number: '+esc(business.accountNumber)+'<br>':'') +
+        (business.branchCode? 'Branch code: '+esc(business.branchCode)+'<br>':'') +
+        (business.accountType? esc(business.accountType):'') +
+        '</div>';
+    }
+
     html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
     html += '</div></div>';
 
@@ -2786,6 +2800,41 @@
         dbNS.doc('spQuotes/' + id).update({ legsCompleted: legsCompleted, updatedAt: new Date().toISOString() });
       });
     });
+  }
+
+  /* ---------------- Solid Prints — Invoices ----------------
+     Invoices are shared `documents`, but only the ones created via "Create invoice from
+     this" / setting a quote's status to Invoiced (tagged with fromQuote) belong to Solid
+     Prints — general Charl Engelbrecht invoices stay out of this list. Reuses the existing
+     document viewer (renderDocView) rather than building a second one. */
+  function spInvoices(){
+    return docs.filter(function(d){ return d.kind==='invoice' && !!d.fromQuote; })
+      .sort(function(a,b){ return (b.dateIssued||'') < (a.dateIssued||'') ? -1 : 1; });
+  }
+  function renderSpInvoices(){
+    var list = spInvoices();
+    var html = '<div class="view-head"><div><h1>Invoices</h1><div class="view-sub">Invoices created from Solid Prints quotes</div></div></div>';
+    html += '<div class="card">';
+    if(!list.length){
+      html += emptyState('📄', 'No invoices yet', 'Set an accepted quote\'s status to Invoiced — or use "Create invoice from this" in the Calculator — to see it here.', [
+        {label:'View quotes', nav:'spquotes', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Number</th><th>Client</th><th>From quote</th><th>Date</th><th>Status</th><th style="text-align:right;">Total</th></tr></thead><tbody>';
+      list.forEach(function(d){
+        html += '<tr class="row-link" data-nav="viewDoc" data-id="' + d.id + '">' +
+          '<td class="mono">' + esc(d.number) + '</td>' +
+          '<td>' + esc(clientLabel(d)) + '</td>' +
+          '<td class="mono">' + esc(d.fromQuote||'—') + '</td>' +
+          '<td>' + fmtDate(d.dateIssued) + '</td>' +
+          '<td>' + statusBadge(d) + '</td>' +
+          '<td class="num-cell">' + fmtMoney(docTotals(d).total) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
   }
 
   function downloadSpQuotePdf(q){
@@ -3021,9 +3070,10 @@
     var t = docTotals(d);
     var c = d.clientSnapshot || {};
 
+    var backTarget = (workspace==='sp' && d.kind==='invoice' && d.fromQuote) ? 'spinvoices' : 'documents';
     var html = '<div class="doc-toolbar no-print">';
     html += '<div class="actions-row">';
-    html += '<button class="btn" data-nav="documents">← Back</button>';
+    html += '<button class="btn" data-nav="' + backTarget + '">← Back</button>';
     if(d.status === 'Draft') html += '<button class="btn" data-nav="newDoc" data-edit-id="'+d.id+'">Edit</button>';
     html += '<button class="btn" data-duplicate="'+d.id+'">Duplicate</button>';
     if(d.kind==='quote' && !d.convertedToInvoice) html += '<button class="btn" data-convert="'+d.id+'">Convert to invoice</button>';
@@ -3074,7 +3124,7 @@
 
     if(d.notes) html += '<div class="sheet-notes">'+esc(d.notes)+'</div>';
 
-    if(d.kind==='invoice' && (business.bankName || business.accountNumber)){
+    if(business.bankName || business.accountNumber){
       html += '<div class="sheet-pay"><div class="label">Payment details</div>' +
         (business.bankName? business.bankName+'<br>':'') +
         (business.accountHolder? 'Account holder: '+esc(business.accountHolder)+'<br>':'') +
