@@ -862,6 +862,10 @@
     inv.items = [{ description: q.jobName, qty: q.quantity, unitPrice: Math.round((Number(q.sellingPricePerUnit)||0) * 100) / 100 }];
     inv.notes = 'From Solid Prints quote ' + q.quoteNumber + '. Payment due within 7 days of the invoice date. Thank you for your business.';
     inv.fromQuote = q.quoteNumber;
+    // Distinguishes this from a Charl Engelbrecht quote-to-invoice conversion (which also
+    // sets fromQuote, to its own "QUO-####" number) so the Solid Prints Invoices tab can
+    // show only invoices that actually came from a Solid Prints quote.
+    inv.fromSpQuote = true;
     inv.number = nextNumber('invoice');
     inv.createdAt = new Date().toISOString();
     var toSave = Object.assign({}, inv); delete toSave.id;
@@ -1227,7 +1231,8 @@
       notes: kind === 'invoice' ? 'Payment due within 7 days of the invoice date. Thank you for your business.' : 'This quote is valid for 14 days from the date above.',
       createdAt: null,
       convertedToInvoice: null,
-      fromQuote: null
+      fromQuote: null,
+      fromSpQuote: false
     };
   }
   function loadDraftFrom(d){
@@ -2808,7 +2813,7 @@
      Prints — general Charl Engelbrecht invoices stay out of this list. Reuses the existing
      document viewer (renderDocView) rather than building a second one. */
   function spInvoices(){
-    return docs.filter(function(d){ return d.kind==='invoice' && !!d.fromQuote; })
+    return docs.filter(function(d){ return d.kind==='invoice' && !!d.fromSpQuote; })
       .sort(function(a,b){ return (b.dateIssued||'') < (a.dateIssued||'') ? -1 : 1; });
   }
   function renderSpInvoices(){
@@ -3070,7 +3075,7 @@
     var t = docTotals(d);
     var c = d.clientSnapshot || {};
 
-    var backTarget = (workspace==='sp' && d.kind==='invoice' && d.fromQuote) ? 'spinvoices' : 'documents';
+    var backTarget = (workspace==='sp' && d.kind==='invoice' && d.fromSpQuote) ? 'spinvoices' : 'documents';
     var html = '<div class="doc-toolbar no-print">';
     html += '<div class="actions-row">';
     html += '<button class="btn" data-nav="' + backTarget + '">← Back</button>';
