@@ -331,6 +331,53 @@
   var modal = null;         // {type:'client', editingId:null} etc
   var pdfBusy = null;       // id of document currently being turned into a PDF
   var reportPdfBusy = false; // true while a report is being turned into a PDF
+  var printCalcSettings = defaultPrintCalcSettings(); // saved defaults for the 3D print calculator
+  var printCalc = null;      // current calculator working state (lazily created)
+
+  function defaultPrintCalcSettings(){
+    return {
+      filamentPricePerKg: 350,
+      printerCostPerHour: 15,
+      laborRatePerHour: 150,
+      markupPct: 30
+    };
+  }
+  function blankPrintCalc(){
+    return {
+      jobName: '',
+      clientId: '',
+      quantity: 1,
+      weightGrams: '',
+      filamentPricePerKg: printCalcSettings.filamentPricePerKg,
+      printHours: '',
+      printerCostPerHour: printCalcSettings.printerCostPerHour,
+      laborHours: '',
+      laborRatePerHour: printCalcSettings.laborRatePerHour,
+      markupPct: printCalcSettings.markupPct
+    };
+  }
+  function printCalcTotals(){
+    var c = printCalc || blankPrintCalc();
+    var materialCost = ((Number(c.weightGrams)||0) / 1000) * (Number(c.filamentPricePerKg)||0);
+    var machineCost = (Number(c.printHours)||0) * (Number(c.printerCostPerHour)||0);
+    var laborCost = (Number(c.laborHours)||0) * (Number(c.laborRatePerHour)||0);
+    var costPerUnit = materialCost + machineCost + laborCost;
+    // round to cents here so the preview total always matches exactly what a created
+    // quote/invoice will show (its line total is qty × a cents-rounded unit price)
+    var pricePerUnit = Math.round(costPerUnit * (1 + (Number(c.markupPct)||0) / 100) * 100) / 100;
+    var qty = Math.max(1, Number(c.quantity) || 1);
+    return {
+      materialCost: materialCost,
+      machineCost: machineCost,
+      laborCost: laborCost,
+      costPerUnit: costPerUnit,
+      markupAmount: pricePerUnit - costPerUnit,
+      pricePerUnit: pricePerUnit,
+      quantity: qty,
+      totalCost: costPerUnit * qty,
+      totalPrice: pricePerUnit * qty
+    };
+  }
 
   function defaultBusiness(){
     return {
@@ -442,6 +489,10 @@
       business = snap.exists ? Object.assign(defaultBusiness(), snap.data()) : defaultBusiness();
       render();
     }));
+    unsubscribers.push(dbNS.doc('settings/printCalc').onSnapshot(function(snap){
+      printCalcSettings = snap.exists ? Object.assign(defaultPrintCalcSettings(), snap.data()) : defaultPrintCalcSettings();
+      render();
+    }));
     unsubscribers.push(dbNS.collection('clients').onSnapshot(function(qs){
       clients = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       clients.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
@@ -468,6 +519,7 @@
     unsubscribers = [];
     dbNS = null;
     business = defaultBusiness(); clients = []; docs = []; reports = []; counters = {invoice:1, quote:1};
+    printCalcSettings = defaultPrintCalcSettings(); printCalc = null;
   }
 
   function friendlyAuthError(err){
@@ -522,7 +574,13 @@
     view = { name: name, params: params || {} };
     uiConfirm = null;
     if(name === 'newDoc'){
-      draft = params && params.editId ? loadDraftFrom(docs.find(function(d){ return d.id === params.editId; })) : blankDraft(params && params.kind || 'invoice');
+      if(params && params.editId){
+        draft = loadDraftFrom(docs.find(function(d){ return d.id === params.editId; }));
+      } else {
+        draft = blankDraft(params && params.kind || 'invoice');
+        if(params && params.prefillItem) draft.items = [params.prefillItem];
+        if(params && params.clientId) draft.clientId = params.clientId;
+      }
     }
     if(name === 'reportBuilder'){
       if(params && params.editId){
@@ -653,6 +711,7 @@
 
   /* ---------------- settings ---------------- */
   function saveBusiness(data){ if(dbNS) dbNS.doc('settings/business').set(data); }
+  function savePrintCalcSettings(data){ if(dbNS) dbNS.doc('settings/printCalc').set(data); }
 
   /* ============================================================
      RENDER
@@ -689,6 +748,7 @@
     renderModal();
     if(view.name === 'newDoc') wireEditorEvents();
     if(view.name === 'reportBuilder') wireReportBuilderEvents();
+    if(view.name === 'dashboard' || !view.name) wireDashboardEvents();
   }
 
   function renderTabs(){
@@ -731,6 +791,7 @@
 
   /* ---------- dashboard ---------- */
   function renderDashboard(){
+    if(!printCalc) printCalc = blankPrintCalc();
     var outstanding = docs.filter(function(d){ return d.kind==='invoice' && d.status==='Sent'; })
       .reduce(function(s,d){ return s + docTotals(d).total; }, 0);
     var overdueCount = docs.filter(isOverdue).length;
@@ -750,6 +811,8 @@
       statCard('Drafts', String(draftCount), '') +
       statCard('Clients', String(clients.length), '') +
       '</div>';
+
+    html += renderPrintCalcCard();
 
     html += '<div class="card"><div class="card-pad" style="padding-bottom:12px;"><h2 style="font-size:16px;">Recent documents</h2></div>';
     if(!recent.length){
@@ -773,6 +836,119 @@
     html += '</div>';
     return html;
   }
+  /* ---------- 3D print calculator (dashboard card) ---------- */
+  function pcField(name,label,value,opts){
+    opts = opts || {};
+    return '<div class="field"><label>'+esc(label)+'</label>' +
+      '<input id="'+name+'" type="text" inputmode="decimal" value="'+esc(value)+'"' + (opts.placeholder?' placeholder="'+esc(opts.placeholder)+'"':'') + '></div>';
+  }
+  function renderPrintCalcCard(){
+    var c = printCalc;
+    var t = printCalcTotals();
+    var html = '<div class="card card-pad" style="margin-bottom:22px;">';
+    html += '<div class="view-sub" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">' +
+      '<h2 style="font-size:16px; margin:0;">🖨️ 3D print job calculator</h2>' +
+      '<button type="button" class="btn btn-sm btn-ghost" id="pc-reset-btn">Reset to my defaults</button></div>';
+
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Job / part name</label><input id="pc-job-name" type="text" value="'+esc(c.jobName)+'" placeholder="e.g. Bracket set x4"></div>';
+    html += '<div class="field"><label>Client <span style="font-weight:400; color:var(--ink-faint);">— optional, needed to save a quote/invoice</span></label><select id="pc-client">' +
+      '<option value="">Choose a client…</option>' +
+      clients.map(function(cl){ return '<option value="'+cl.id+'"'+(c.clientId===cl.id?' selected':'')+'>'+esc(cl.name)+(cl.company?' — '+esc(cl.company):'')+'</option>'; }).join('') +
+      '</select></div>';
+    html += '</div>';
+
+    html += '<h3 style="font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:18px 0 10px;">Job inputs</h3>';
+    html += '<div class="field-row">';
+    html += pcField('pc-weight','Filament used (grams)', c.weightGrams, {placeholder:'e.g. 85'});
+    html += pcField('pc-filament-price','Filament price (per kg)', c.filamentPricePerKg);
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += pcField('pc-print-hours','Print time (hours)', c.printHours, {placeholder:'e.g. 3.5'});
+    html += pcField('pc-printer-rate','Printer cost per hour — power & wear', c.printerCostPerHour);
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += pcField('pc-labor-hours','Labor / post-processing (hours)', c.laborHours, {placeholder:'e.g. 0.5'});
+    html += pcField('pc-labor-rate','Labor rate (per hour)', c.laborRatePerHour);
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += pcField('pc-quantity','Quantity', c.quantity);
+    html += pcField('pc-markup','Markup (%)', c.markupPct);
+    html += '</div>';
+
+    html += '<div class="totals" style="margin-top:18px;">' +
+      '<div class="totals-row"><span>Material cost</span><span class="mono" id="pc-out-material">'+fmtMoney(t.materialCost)+'</span></div>' +
+      '<div class="totals-row"><span>Print time cost</span><span class="mono" id="pc-out-machine">'+fmtMoney(t.machineCost)+'</span></div>' +
+      '<div class="totals-row"><span>Labor cost</span><span class="mono" id="pc-out-labor">'+fmtMoney(t.laborCost)+'</span></div>' +
+      '<div class="totals-row"><span>Cost per unit</span><span class="mono" id="pc-out-cost-unit">'+fmtMoney(t.costPerUnit)+'</span></div>' +
+      '<div class="totals-row"><span>Markup ('+esc(c.markupPct||0)+'%)</span><span class="mono" id="pc-out-markup">'+fmtMoney(t.markupAmount)+'</span></div>' +
+      '<div class="totals-row"><span>Price per unit</span><span class="mono" id="pc-out-price-unit">'+fmtMoney(t.pricePerUnit)+'</span></div>' +
+      '<div class="totals-row total"><span id="pc-out-total-label">Total ('+esc(t.quantity)+' × '+fmtMoney(t.pricePerUnit)+')</span><span class="mono" id="pc-out-total">'+fmtMoney(t.totalPrice)+'</span></div>' +
+      '</div>';
+
+    html += '<div class="actions-row" style="margin-top:16px;">' +
+      '<button type="button" class="btn btn-primary" id="pc-create-quote-btn">Create quote from this</button>' +
+      '<button type="button" class="btn" id="pc-create-invoice-btn">Create invoice from this</button>' +
+      '</div>';
+    html += '<p class="hint" style="margin-top:8px;">Rates start from your saved defaults (edit them anytime in Settings) but you can tweak them here for just this job.</p>';
+
+    html += '</div>';
+    return html;
+  }
+  function updatePrintCalcOutputs(){
+    var t = printCalcTotals();
+    var set = function(id, val){ var el = document.getElementById(id); if(el) el.textContent = val; };
+    set('pc-out-material', fmtMoney(t.materialCost));
+    set('pc-out-machine', fmtMoney(t.machineCost));
+    set('pc-out-labor', fmtMoney(t.laborCost));
+    set('pc-out-cost-unit', fmtMoney(t.costPerUnit));
+    set('pc-out-markup', fmtMoney(t.markupAmount));
+    set('pc-out-price-unit', fmtMoney(t.pricePerUnit));
+    set('pc-out-total', fmtMoney(t.totalPrice));
+    set('pc-out-total-label', 'Total (' + t.quantity + ' × ' + fmtMoney(t.pricePerUnit) + ')');
+  }
+  function wireDashboardEvents(){
+    var bind = function(id, key, isNumber){
+      var el = document.getElementById(id);
+      if(!el) return;
+      el.addEventListener('input', function(){
+        printCalc[key] = isNumber ? this.value : this.value;
+        updatePrintCalcOutputs();
+      });
+    };
+    bind('pc-job-name','jobName');
+    bind('pc-weight','weightGrams', true);
+    bind('pc-filament-price','filamentPricePerKg', true);
+    bind('pc-print-hours','printHours', true);
+    bind('pc-printer-rate','printerCostPerHour', true);
+    bind('pc-labor-hours','laborHours', true);
+    bind('pc-labor-rate','laborRatePerHour', true);
+    bind('pc-quantity','quantity', true);
+    bind('pc-markup','markupPct', true);
+
+    // markup % is echoed in a totals row label, so re-render (not just recompute) when it changes
+    var markupEl = document.getElementById('pc-markup');
+    if(markupEl) markupEl.addEventListener('change', function(){ render(); });
+
+    var clientSel = document.getElementById('pc-client');
+    if(clientSel) clientSel.addEventListener('change', function(){ printCalc.clientId = this.value; });
+
+    var resetBtn = document.getElementById('pc-reset-btn');
+    if(resetBtn) resetBtn.addEventListener('click', function(){ printCalc = blankPrintCalc(); render(); });
+
+    function startDocFromCalc(kind){
+      var t = printCalcTotals();
+      if(t.pricePerUnit <= 0){ alertBanner('Enter at least a filament weight, print time or labor time first.'); return; }
+      var desc = (printCalc.jobName || '').trim() || '3D printing job';
+      var item = { description: desc, qty: t.quantity, unitPrice: Math.round(t.pricePerUnit * 100) / 100 };
+      go('newDoc', { kind: kind, prefillItem: item, clientId: printCalc.clientId || '' });
+    }
+    var quoteBtn = document.getElementById('pc-create-quote-btn');
+    if(quoteBtn) quoteBtn.addEventListener('click', function(){ startDocFromCalc('quote'); });
+    var invoiceBtn = document.getElementById('pc-create-invoice-btn');
+    if(invoiceBtn) invoiceBtn.addEventListener('click', function(){ startDocFromCalc('invoice'); });
+  }
+
   function statCard(label, value, tone){
     return '<div class="card stat"><div class="stat-label">' + label + '</div><div class="stat-value' + (tone?' '+tone:'') + '">' + value + '</div></div>';
   }
@@ -913,6 +1089,21 @@
     html += field('accountType','Account type', b.accountType, 'text');
 
     html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save settings</button></div>';
+    html += '</form></div>';
+
+    html += '<div class="card card-pad" style="margin-top:20px;">';
+    html += '<form id="printcalc-form">';
+    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">3D print calculator defaults</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Used to pre-fill the print job calculator on your Dashboard. You can still override any of these for a specific job.</p>';
+    html += fieldRow([
+      field('filamentPricePerKg','Filament price (per kg)', printCalcSettings.filamentPricePerKg, 'text'),
+      field('printerCostPerHour','Printer cost per hour — power & wear', printCalcSettings.printerCostPerHour, 'text')
+    ]);
+    html += fieldRow([
+      field('laborRatePerHour','Labor rate (per hour)', printCalcSettings.laborRatePerHour, 'text'),
+      field('markupPct','Default markup (%)', printCalcSettings.markupPct, 'text')
+    ]);
+    html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save print calculator defaults</button></div>';
     html += '</form></div>';
     return html;
   }
@@ -1777,6 +1968,16 @@
       });
       saveBusiness(data);
       alertBanner('Settings saved.');
+    }
+    if(e.target.id === 'printcalc-form'){
+      e.preventDefault();
+      var pfd = new FormData(e.target);
+      var pdata = {};
+      ['filamentPricePerKg','printerCostPerHour','laborRatePerHour','markupPct'].forEach(function(k){
+        pdata[k] = Number(pfd.get(k)) || 0;
+      });
+      savePrintCalcSettings(pdata);
+      alertBanner('Print calculator defaults saved.');
     }
   });
 
