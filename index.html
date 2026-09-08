@@ -377,7 +377,8 @@
       calcType: 'single',              // 'plate' | 'single'
       unitsPerPlate: '', printTimePerPlate: '', printTimeHours: '',
       filamentGrams: {},               // materialId -> grams (per plate if calcType 'plate', else job total;
-                                        // per UNIT when splitEnabled — see printerSplits below)
+                                        // unused when splitEnabled — see printerSplits[*].filamentGrams below,
+                                        // which is per PLATE, same as calcType 'plate')
       wasteGrams: spSettings.defaultWasteGrams, failureAllowancePct: 0,
       labourEnabled: spSettings.defaultLabourOn, labourHours: '', labourRate: spSettings.defaultLabourRate,
       postProcessing: [],              // {description, hours, rate, amount}
@@ -396,9 +397,11 @@
   }
   function blankPrinterSplitLeg(){
     var p = printers.find(function(x){ return x.active !== false; });
-    // filamentGrams is per THIS leg's printer — grams per unit, keyed by materialId — since
-    // the same part can use a different amount of filament (or a different colour entirely)
-    // depending on which machine actually prints it (nozzle, purge/prime behaviour, etc).
+    // filamentGrams is per THIS leg's printer — grams per PLATE, keyed by materialId (same
+    // units as time-per-plate and waste-per-plate above) — since the same part can use a
+    // different amount of filament (or a different colour entirely) depending on which
+    // machine actually prints it (nozzle, purge/prime behaviour, etc), and grams-per-plate
+    // is what a slicer actually reports.
     return { printerId: p ? p.id : '', quantity: 0, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: p ? (Number(p.defaultWasteGrams)||0) : 0, filamentGrams: {} };
   }
   /* Given a total quantity and each printer's plate size/time, works out how many units
@@ -605,14 +608,15 @@
         };
       }
       var plates = Math.ceil(legQuantity / unitsPerPlate);
-      // Grams-per-unit are entered separately for THIS leg's own printer (leg.filamentGrams) —
-      // not shared across legs — since the H2C and P2S can genuinely use different amounts of
-      // the same material (or different materials/colours entirely) for the same part.
-      var legGramsPerUnit = leg.filamentGrams || {};
+      // Grams-per-PLATE are entered separately for THIS leg's own printer (leg.filamentGrams) —
+      // not shared across legs, and not per-unit — since the H2C and P2S can genuinely use
+      // different amounts of the same material (or different materials/colours entirely) for
+      // the same part, and a slicer reports filament used per plate, not per individual unit.
+      var legGramsPerPlate = leg.filamentGrams || {};
       var legFilamentGrams = {};
-      Object.keys(legGramsPerUnit).forEach(function(mid){
-        var perUnit = Number(legGramsPerUnit[mid])||0;
-        if(perUnit) legFilamentGrams[mid] = perUnit * legQuantity;
+      Object.keys(legGramsPerPlate).forEach(function(mid){
+        var perPlate = Number(legGramsPerPlate[mid])||0;
+        if(perPlate) legFilamentGrams[mid] = perPlate * plates;
       });
       var legJob = {
         calcType: 'single', quantity: legQuantity, filamentGrams: legFilamentGrams,
@@ -1809,7 +1813,7 @@
     /* ---- filament ---- */
     html += '<div class="card card-pad" style="margin-bottom:18px;">';
     html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament / materials</h3>';
-    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per unit, entered separately for each printer — the same part can use a different amount (or none) of a material depending on the machine. Waste differs per printer too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.')) + ' Prices come from your Materials database.</p>';
+    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per plate, entered separately for each printer — straight off your slicer for that machine — since the same part can use a different amount (or none) of a material depending on where it prints. Waste differs per printer too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.')) + ' Prices come from your Materials database.</p>';
     if(!activeMaterials.length){
       html += '<p class="hint">No active materials yet — add one on the Materials tab.</p>';
     } else if(calc.splitEnabled){
@@ -1817,7 +1821,7 @@
       html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th>' +
         splitLegsForFil.map(function(leg, i){
           var p = printers.find(function(x){ return x.id === leg.printerId; });
-          return '<th>' + esc(p ? p.name : ('Printer ' + (i+1))) + ' (g/unit)</th>';
+          return '<th>' + esc(p ? p.name : ('Printer ' + (i+1))) + ' (g/plate)</th>';
         }).join('') +
         '<th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
       activeMaterials.forEach(function(m){
