@@ -265,6 +265,11 @@
   .banner{ display:flex; gap:10px; align-items:flex-start; padding:12px 14px; border-radius:8px; background:var(--accent-soft); color:var(--accent-ink); font-size:13.5px; margin-bottom:18px; }
   .confirm-inline{ display:flex; gap:6px; align-items:center; }
 
+  details.card > summary{ list-style:none; }
+  details.card > summary::-webkit-details-marker{ display:none; }
+  details.card > summary::before{ content:'▸ '; color:var(--ink-faint); }
+  details.card[open] > summary::before{ content:'▾ '; color:var(--ink-faint); }
+
   @media print{
     body *{ visibility:hidden; }
     .sheet, .sheet *{ visibility:visible; }
@@ -331,52 +336,174 @@
   var modal = null;         // {type:'client', editingId:null} etc
   var pdfBusy = null;       // id of document currently being turned into a PDF
   var reportPdfBusy = false; // true while a report is being turned into a PDF
-  var printCalcSettings = defaultPrintCalcSettings(); // saved defaults for the 3D print calculator
-  var printCalc = null;      // current calculator working state (lazily created)
+  /* ---------------- Solid Prints costing system ----------------
+     Printers / Materials / Consumables databases + a central, pure costing
+     engine (computeJobCost) that the Calculator uses today and that
+     Quotes/Dashboard/Reports will reuse later, so the math lives in exactly
+     one place. */
+  var printers = [];
+  var materials = [];
+  var consumables = [];
+  var spSettings = defaultSpSettings();
+  var calc = null;           // current calculator working state (lazily created)
+  var calcAdvancedOpen = false; // whether the Calculator's advanced-costs <details> is expanded (persisted across re-renders)
 
-  function defaultPrintCalcSettings(){
+  function defaultSpSettings(){
     return {
-      filamentPricePerKg: 350,
-      printerCostPerHour: 15,
-      laborRatePerHour: 150,
-      markupPct: 30
+      electricityRate: 3.87,
+      defaultLabourRate: 150,
+      markups: [100,125,150,175,200],
+      defaultMarkup: 150,
+      customMarkupAllowed: true,
+      defaultWastePct: 0,
+      defaultPackaging: 0,
+      defaultLabourOn: false,
+      minimumMarginPct: 40
     };
   }
-  function blankPrintCalc(){
+  function blankCalc(){
     return {
-      jobName: '',
-      clientId: '',
-      quantity: 1,
-      weightGrams: '',
-      filamentPricePerKg: printCalcSettings.filamentPricePerKg,
-      printHours: '',
-      printerCostPerHour: printCalcSettings.printerCostPerHour,
-      laborHours: '',
-      laborRatePerHour: printCalcSettings.laborRatePerHour,
-      markupPct: printCalcSettings.markupPct
+      jobName: '', clientId: '', quantity: 1, printerId: (printers[0] && printers[0].id) || '',
+      calcType: 'single',              // 'plate' | 'single'
+      unitsPerPlate: '', printTimePerPlate: '', printTimeHours: '',
+      filamentGrams: {},               // materialId -> grams (per plate if calcType 'plate', else job total)
+      wastePct: spSettings.defaultWastePct, failureAllowancePct: 0,
+      labourEnabled: spSettings.defaultLabourOn, labourHours: '', labourRate: spSettings.defaultLabourRate,
+      postProcessing: [],              // {description, hours, rate, amount}
+      consumablesUsed: [],             // {consumableId, quantity}
+      packagingAmount: spSettings.defaultPackaging,
+      otherCosts: [],                  // {description, amount}
+      customPrice: '', rounding: 'none', roundingCustom: ''
     };
   }
-  function printCalcTotals(){
-    var c = printCalc || blankPrintCalc();
-    var materialCost = ((Number(c.weightGrams)||0) / 1000) * (Number(c.filamentPricePerKg)||0);
-    var machineCost = (Number(c.printHours)||0) * (Number(c.printerCostPerHour)||0);
-    var laborCost = (Number(c.laborHours)||0) * (Number(c.laborRatePerHour)||0);
-    var costPerUnit = materialCost + machineCost + laborCost;
-    // round to cents here so the preview total always matches exactly what a created
-    // quote/invoice will show (its line total is qty × a cents-rounded unit price)
-    var pricePerUnit = Math.round(costPerUnit * (1 + (Number(c.markupPct)||0) / 100) * 100) / 100;
-    var qty = Math.max(1, Number(c.quantity) || 1);
+  function printerMachineRate(printer){
+    if(!printer) return {depreciationPerHour:0, maintenancePerHour:0, hourlyRate:0};
+    var maintenancePerHour = Number(printer.maintenancePerHour)||0;
+    if(printer.useManualHourlyCost){
+      return {depreciationPerHour:0, maintenancePerHour:maintenancePerHour, hourlyRate: Number(printer.manualHourlyCost)||0};
+    }
+    var depreciationPerHour = (Number(printer.purchasePrice)||0) / Math.max(1, Number(printer.expectedLifeHours)||1);
+    return {depreciationPerHour:depreciationPerHour, maintenancePerHour:maintenancePerHour, hourlyRate: depreciationPerHour + maintenancePerHour};
+  }
+  function roundPrice(price, rounding, roundingCustom){
+    if(rounding === '1') return Math.round(price);
+    if(rounding === '5') return Math.round(price/5)*5;
+    if(rounding === '10') return Math.round(price/10)*10;
+    if(rounding === 'custom'){ var step = Number(roundingCustom)||0; return step>0 ? Math.round(price/step)*step : price; }
+    return price;
+  }
+  /* Central costing engine — pure function, no globals read inside.
+     job: calculator/job state (see blankCalc). printer: resolved printer
+     record (or a frozen snapshot). materialsById/consumablesById: lookup
+     maps. settings: {electricityRate, markups, defaultMarkup, minimumMarginPct}. */
+  function computeJobCost(job, printer, materialsById, consumablesById, settings){
+    var quantity = Math.max(1, Number(job.quantity)||1);
+    var isPlate = job.calcType === 'plate';
+    var plates = 1, printTimeUnit = 0;
+    if(isPlate){
+      var unitsPerPlate = Math.max(1, Number(job.unitsPerPlate)||1);
+      plates = Math.ceil(quantity / unitsPerPlate);
+      printTimeUnit = Number(job.printTimePerPlate)||0;
+    } else {
+      printTimeUnit = Number(job.printTimeHours)||0;
+    }
+    var multiplier = isPlate ? plates : 1;
+    var totalPrintHours = isPlate ? (printTimeUnit * plates) : printTimeUnit;
+    var wastePct = (Number(job.wastePct)||0) + (Number(job.failureAllowancePct)||0);
+
+    var filamentLines = [], totalFilamentRawG = 0, totalFilamentCostedG = 0, filamentCost = 0;
+    Object.keys(job.filamentGrams || {}).forEach(function(materialId){
+      var rawEach = Number(job.filamentGrams[materialId]) || 0;
+      if(!rawEach) return;
+      var mat = materialsById[materialId];
+      if(!mat) return;
+      var rawTotal = rawEach * multiplier;
+      var costedTotal = rawTotal * (1 + wastePct/100);
+      var cost = (costedTotal/1000) * (Number(mat.pricePerKg)||0);
+      totalFilamentRawG += rawTotal; totalFilamentCostedG += costedTotal; filamentCost += cost;
+      filamentLines.push({materialId:materialId, colour:mat.colour, materialType:mat.materialType, grams:rawTotal, costedGrams:costedTotal, pricePerKg:Number(mat.pricePerKg)||0, cost:cost});
+    });
+
+    var electricityRate = Number(settings.electricityRate)||0;
+    var powerKw = printer ? (Number(printer.powerWatts)||0)/1000 : 0;
+    var electricityCost = totalPrintHours * powerKw * electricityRate;
+
+    var mc = printerMachineRate(printer);
+    var machineCost = totalPrintHours * mc.hourlyRate;
+
+    var labourCost = job.labourEnabled ? (Number(job.labourHours)||0) * (Number(job.labourRate)||0) : 0;
+
+    var postProcessingCost = (job.postProcessing||[]).reduce(function(s,p){ return s + (Number(p.amount)||0); }, 0);
+
+    var consumablesLines = [], consumablesCost = 0;
+    (job.consumablesUsed||[]).forEach(function(row){
+      var c = consumablesById[row.consumableId];
+      if(!c) return;
+      var qty = Number(row.quantity)||0;
+      var unitCost = (Number(c.purchasePrice)||0) / Math.max(1, Number(c.purchaseQuantity)||1);
+      var cost = qty * unitCost;
+      consumablesCost += cost;
+      consumablesLines.push({consumableId:row.consumableId, name:c.name, quantity:qty, unitCost:unitCost, cost:cost});
+    });
+
+    var packagingCost = Number(job.packagingAmount)||0;
+    var otherCost = (job.otherCosts||[]).reduce(function(s,o){ return s + (Number(o.amount)||0); }, 0);
+
+    var totalCost = filamentCost + electricityCost + machineCost + labourCost + postProcessingCost + consumablesCost + packagingCost + otherCost;
+    var costPerUnit = totalCost / quantity;
+
+    var markups = (settings.markups && settings.markups.length) ? settings.markups : [100,125,150,175,200];
+    var markupRows = markups.map(function(pct){
+      var raw = costPerUnit * (1 + pct/100);
+      var priceUnit = roundPrice(raw, job.rounding, job.roundingCustom);
+      var profitUnit = priceUnit - costPerUnit;
+      return {
+        pct: pct, rawPriceUnit: raw, priceUnit: priceUnit, priceTotal: priceUnit*quantity,
+        profitUnit: profitUnit, profitTotal: profitUnit*quantity,
+        marginPct: priceUnit>0 ? (profitUnit/priceUnit*100) : 0,
+        actualMarkupPct: costPerUnit>0 ? (profitUnit/costPerUnit*100) : 0
+      };
+    });
+
+    var customPrice = null;
+    if(job.customPrice !== '' && job.customPrice != null){
+      var custPrice = roundPrice(Number(job.customPrice)||0, job.rounding, job.roundingCustom);
+      var custProfitUnit = custPrice - costPerUnit;
+      customPrice = {
+        priceUnit: custPrice, priceTotal: custPrice*quantity,
+        profitUnit: custProfitUnit, profitTotal: custProfitUnit*quantity,
+        marginPct: custPrice>0 ? (custProfitUnit/custPrice*100) : 0,
+        actualMarkupPct: costPerUnit>0 ? (custProfitUnit/costPerUnit*100) : 0
+      };
+    }
+
+    var defaultRow = markupRows.filter(function(r){ return r.pct === Number(settings.defaultMarkup); })[0] || markupRows[0];
+    var activeSelection = customPrice || defaultRow || {priceUnit:0,priceTotal:0,profitUnit:0,profitTotal:0,marginPct:0,actualMarkupPct:0};
+    var minMargin = Number(settings.minimumMarginPct)||0;
+    var status = 'red';
+    if(activeSelection.priceUnit > 0 && activeSelection.marginPct >= minMargin) status = 'green';
+    else if(activeSelection.marginPct > 0) status = 'yellow';
+
     return {
-      materialCost: materialCost,
-      machineCost: machineCost,
-      laborCost: laborCost,
-      costPerUnit: costPerUnit,
-      markupAmount: pricePerUnit - costPerUnit,
-      pricePerUnit: pricePerUnit,
-      quantity: qty,
-      totalCost: costPerUnit * qty,
-      totalPrice: pricePerUnit * qty
+      quantity: quantity, plates: plates, isPlate: isPlate, totalPrintHours: totalPrintHours,
+      totalFilamentRawG: totalFilamentRawG, totalFilamentCostedG: totalFilamentCostedG,
+      filamentLines: filamentLines, filamentCost: filamentCost,
+      electricityCost: electricityCost, electricityRate: electricityRate, powerKw: powerKw,
+      machineCost: machineCost, machineHourlyRate: mc.hourlyRate, depreciationPerHour: mc.depreciationPerHour, maintenancePerHour: mc.maintenancePerHour,
+      labourCost: labourCost, postProcessingCost: postProcessingCost,
+      consumablesLines: consumablesLines, consumablesCost: consumablesCost,
+      packagingCost: packagingCost, otherCost: otherCost,
+      totalCost: totalCost, costPerUnit: costPerUnit,
+      markupRows: markupRows, customPrice: customPrice, activeSelection: activeSelection,
+      breakEvenPerUnit: costPerUnit, minMargin: minMargin, status: status
     };
+  }
+  function calcMaterialsById(){ var m={}; materials.forEach(function(x){ m[x.id]=x; }); return m; }
+  function calcConsumablesById(){ var m={}; consumables.forEach(function(x){ m[x.id]=x; }); return m; }
+  function calcResult(){
+    if(!calc) calc = blankCalc();
+    var printer = printers.find(function(p){ return p.id === calc.printerId; }) || null;
+    return computeJobCost(calc, printer, calcMaterialsById(), calcConsumablesById(), spSettings);
   }
 
   function defaultBusiness(){
@@ -483,14 +610,74 @@
     });
   }
 
+  function seedInitialPrintersIfEmpty(){
+    var ref = firestore.collection(userPath('printers'));
+    return ref.limit(1).get().then(function(qs){
+      if(!qs.empty) return;
+      var seedPrinters = [
+        {id:'h2c', name:'H2C', manufacturer:'Bambu Lab', model:'H2C', purchasePrice:54964.25, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWastePct:0, active:true},
+        {id:'p2s', name:'P2S', manufacturer:'Bambu Lab', model:'P2S', purchasePrice:21999, purchaseDate:todayISO(), powerWatts:350, expectedLifeHours:10000, maintenancePerHour:0, manualHourlyCost:0, useManualHourlyCost:false, defaultWastePct:3, active:true}
+      ];
+      var batch = firestore.batch();
+      seedPrinters.forEach(function(p){ var id=p.id; var data=Object.assign({},p); delete data.id; batch.set(firestore.doc(userPath('printers')+'/'+id), data); });
+      return batch.commit();
+    });
+  }
+  function seedInitialMaterialsIfEmpty(){
+    var ref = firestore.collection(userPath('materials'));
+    return ref.limit(1).get().then(function(qs){
+      if(!qs.empty) return;
+      var colours = ['White','Black','Grey','Red','Pink','Purple','Blue','Green','Brown','Orange'];
+      var batch = firestore.batch();
+      colours.forEach(function(colour){
+        var id = 'pla-' + colour.toLowerCase();
+        batch.set(firestore.doc(userPath('materials')+'/'+id), {
+          materialType:'PLA', colour:colour, supplier:'', pricePerKg:455, spoolWeightG:1000,
+          stockG:1000, reorderLevelG:200, active:true
+        });
+      });
+      return batch.commit();
+    });
+  }
+  function seedInitialConsumablesIfEmpty(){
+    var ref = firestore.collection(userPath('consumables'));
+    return ref.limit(1).get().then(function(qs){
+      if(!qs.empty) return;
+      var seedConsumables = [
+        {id:'keyring', name:'Keyring', category:'Hardware', supplier:'', purchaseQuantity:500, purchasePrice:558.90, stockQuantity:500, reorderLevel:100, active:true},
+        {id:'plastic-sleeve', name:'Plastic Sleeve', category:'Packaging', supplier:'', purchaseQuantity:500, purchasePrice:200, stockQuantity:500, reorderLevel:100, active:true},
+        {id:'sticker', name:'Sticker', category:'Packaging', supplier:'', purchaseQuantity:250, purchasePrice:187.50, stockQuantity:250, reorderLevel:50, active:true},
+        {id:'small-box', name:'Small Box', category:'Packaging', supplier:'', purchaseQuantity:100, purchasePrice:450, stockQuantity:100, reorderLevel:20, active:true}
+      ];
+      var batch = firestore.batch();
+      seedConsumables.forEach(function(c){ var id=c.id; var data=Object.assign({},c); delete data.id; batch.set(firestore.doc(userPath('consumables')+'/'+id), data); });
+      return batch.commit();
+    });
+  }
+
   function setupSubscriptions(){
     dbNS = { doc: function(p){ return makeDocRef(userPath(p)); }, collection: function(p){ return makeCollectionRef(userPath(p)); } };
     unsubscribers.push(dbNS.doc('settings/business').onSnapshot(function(snap){
       business = snap.exists ? Object.assign(defaultBusiness(), snap.data()) : defaultBusiness();
       render();
     }));
-    unsubscribers.push(dbNS.doc('settings/printCalc').onSnapshot(function(snap){
-      printCalcSettings = snap.exists ? Object.assign(defaultPrintCalcSettings(), snap.data()) : defaultPrintCalcSettings();
+    unsubscribers.push(dbNS.doc('settings/solidPrints').onSnapshot(function(snap){
+      spSettings = snap.exists ? Object.assign(defaultSpSettings(), snap.data()) : defaultSpSettings();
+      render();
+    }));
+    unsubscribers.push(dbNS.collection('printers').onSnapshot(function(qs){
+      printers = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      printers.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+      render();
+    }));
+    unsubscribers.push(dbNS.collection('materials').onSnapshot(function(qs){
+      materials = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      materials.sort(function(a,b){ return (a.materialType||'').localeCompare(b.materialType||'') || (a.colour||'').localeCompare(b.colour||''); });
+      render();
+    }));
+    unsubscribers.push(dbNS.collection('consumables').onSnapshot(function(qs){
+      consumables = qs.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      consumables.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
       render();
     }));
     unsubscribers.push(dbNS.collection('clients').onSnapshot(function(qs){
@@ -519,7 +706,7 @@
     unsubscribers = [];
     dbNS = null;
     business = defaultBusiness(); clients = []; docs = []; reports = []; counters = {invoice:1, quote:1};
-    printCalcSettings = defaultPrintCalcSettings(); printCalc = null;
+    spSettings = defaultSpSettings(); calc = null; calcAdvancedOpen = false; printers = []; materials = []; consumables = [];
   }
 
   function friendlyAuthError(err){
@@ -546,7 +733,12 @@
     if(user){
       currentUser = user;
       connectState = 'signed-in';
-      seedInitialClientsIfEmpty().catch(function(e){ console.error(e); }).then(function(){
+      Promise.all([
+        seedInitialClientsIfEmpty().catch(function(e){ console.error(e); }),
+        seedInitialPrintersIfEmpty().catch(function(e){ console.error(e); }),
+        seedInitialMaterialsIfEmpty().catch(function(e){ console.error(e); }),
+        seedInitialConsumablesIfEmpty().catch(function(e){ console.error(e); })
+      ]).then(function(){
         setupSubscriptions();
         render();
       });
@@ -711,15 +903,39 @@
 
   /* ---------------- settings ---------------- */
   function saveBusiness(data){ if(dbNS) dbNS.doc('settings/business').set(data); }
-  function savePrintCalcSettings(data){ if(dbNS) dbNS.doc('settings/printCalc').set(data); }
+  function saveSpSettings(data){ if(dbNS) dbNS.doc('settings/solidPrints').set(data); }
+
+  /* ---------------- printers / materials / consumables ---------------- */
+  function savePrinter(data, editingId){
+    if(!dbNS) return;
+    if(editingId){ dbNS.doc('printers/' + editingId).set(data); return editingId; }
+    var ref = dbNS.collection('printers').doc(); ref.set(data); return ref.id;
+  }
+  function deletePrinter(id){ if(dbNS) dbNS.doc('printers/' + id).delete(); }
+  function saveMaterial(data, editingId){
+    if(!dbNS) return;
+    if(editingId){ dbNS.doc('materials/' + editingId).set(data); return editingId; }
+    var ref = dbNS.collection('materials').doc(); ref.set(data); return ref.id;
+  }
+  function deleteMaterial(id){ if(dbNS) dbNS.doc('materials/' + id).delete(); }
+  function saveConsumable(data, editingId){
+    if(!dbNS) return;
+    if(editingId){ dbNS.doc('consumables/' + editingId).set(data); return editingId; }
+    var ref = dbNS.collection('consumables').doc(); ref.set(data); return ref.id;
+  }
+  function deleteConsumable(id){ if(dbNS) dbNS.doc('consumables/' + id).delete(); }
 
   /* ============================================================
      RENDER
      ============================================================ */
   var TABS = [
     {name:'dashboard', label:'Dashboard'},
+    {name:'calculator', label:'Calculator'},
     {name:'documents', label:'Documents'},
     {name:'clients', label:'Clients'},
+    {name:'printers', label:'Printers'},
+    {name:'materials', label:'Materials'},
+    {name:'consumables', label:'Consumables'},
     {name:'reports', label:'Reports'},
     {name:'settings', label:'Settings'}
   ];
@@ -737,6 +953,10 @@
     switch(view.name){
       case 'documents': html += renderDocuments(); break;
       case 'clients': html += renderClients(); break;
+      case 'printers': html += renderPrinters(); break;
+      case 'materials': html += renderMaterials(); break;
+      case 'consumables': html += renderConsumables(); break;
+      case 'calculator': html += renderCalculator(); break;
       case 'reports': html += renderReports(); break;
       case 'reportBuilder': html += renderReportBuilder(); break;
       case 'settings': html += renderSettings(); break;
@@ -748,7 +968,7 @@
     renderModal();
     if(view.name === 'newDoc') wireEditorEvents();
     if(view.name === 'reportBuilder') wireReportBuilderEvents();
-    if(view.name === 'dashboard' || !view.name) wireDashboardEvents();
+    if(view.name === 'calculator') wireCalculatorEvents();
   }
 
   function renderTabs(){
@@ -791,7 +1011,6 @@
 
   /* ---------- dashboard ---------- */
   function renderDashboard(){
-    if(!printCalc) printCalc = blankPrintCalc();
     var outstanding = docs.filter(function(d){ return d.kind==='invoice' && d.status==='Sent'; })
       .reduce(function(s,d){ return s + docTotals(d).total; }, 0);
     var overdueCount = docs.filter(isOverdue).length;
@@ -811,8 +1030,6 @@
       statCard('Drafts', String(draftCount), '') +
       statCard('Clients', String(clients.length), '') +
       '</div>';
-
-    html += renderPrintCalcCard();
 
     html += '<div class="card"><div class="card-pad" style="padding-bottom:12px;"><h2 style="font-size:16px;">Recent documents</h2></div>';
     if(!recent.length){
@@ -835,118 +1052,6 @@
     }
     html += '</div>';
     return html;
-  }
-  /* ---------- 3D print calculator (dashboard card) ---------- */
-  function pcField(name,label,value,opts){
-    opts = opts || {};
-    return '<div class="field"><label>'+esc(label)+'</label>' +
-      '<input id="'+name+'" type="text" inputmode="decimal" value="'+esc(value)+'"' + (opts.placeholder?' placeholder="'+esc(opts.placeholder)+'"':'') + '></div>';
-  }
-  function renderPrintCalcCard(){
-    var c = printCalc;
-    var t = printCalcTotals();
-    var html = '<div class="card card-pad" style="margin-bottom:22px;">';
-    html += '<div class="view-sub" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">' +
-      '<h2 style="font-size:16px; margin:0;">🖨️ 3D print job calculator</h2>' +
-      '<button type="button" class="btn btn-sm btn-ghost" id="pc-reset-btn">Reset to my defaults</button></div>';
-
-    html += '<div class="field-row">';
-    html += '<div class="field"><label>Job / part name</label><input id="pc-job-name" type="text" value="'+esc(c.jobName)+'" placeholder="e.g. Bracket set x4"></div>';
-    html += '<div class="field"><label>Client <span style="font-weight:400; color:var(--ink-faint);">— optional, needed to save a quote/invoice</span></label><select id="pc-client">' +
-      '<option value="">Choose a client…</option>' +
-      clients.map(function(cl){ return '<option value="'+cl.id+'"'+(c.clientId===cl.id?' selected':'')+'>'+esc(cl.name)+(cl.company?' — '+esc(cl.company):'')+'</option>'; }).join('') +
-      '</select></div>';
-    html += '</div>';
-
-    html += '<h3 style="font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:18px 0 10px;">Job inputs</h3>';
-    html += '<div class="field-row">';
-    html += pcField('pc-weight','Filament used (grams)', c.weightGrams, {placeholder:'e.g. 85'});
-    html += pcField('pc-filament-price','Filament price (per kg)', c.filamentPricePerKg);
-    html += '</div>';
-    html += '<div class="field-row">';
-    html += pcField('pc-print-hours','Print time (hours)', c.printHours, {placeholder:'e.g. 3.5'});
-    html += pcField('pc-printer-rate','Printer cost per hour — power & wear', c.printerCostPerHour);
-    html += '</div>';
-    html += '<div class="field-row">';
-    html += pcField('pc-labor-hours','Labor / post-processing (hours)', c.laborHours, {placeholder:'e.g. 0.5'});
-    html += pcField('pc-labor-rate','Labor rate (per hour)', c.laborRatePerHour);
-    html += '</div>';
-    html += '<div class="field-row">';
-    html += pcField('pc-quantity','Quantity', c.quantity);
-    html += pcField('pc-markup','Markup (%)', c.markupPct);
-    html += '</div>';
-
-    html += '<div class="totals" style="margin-top:18px;">' +
-      '<div class="totals-row"><span>Material cost</span><span class="mono" id="pc-out-material">'+fmtMoney(t.materialCost)+'</span></div>' +
-      '<div class="totals-row"><span>Print time cost</span><span class="mono" id="pc-out-machine">'+fmtMoney(t.machineCost)+'</span></div>' +
-      '<div class="totals-row"><span>Labor cost</span><span class="mono" id="pc-out-labor">'+fmtMoney(t.laborCost)+'</span></div>' +
-      '<div class="totals-row"><span>Cost per unit</span><span class="mono" id="pc-out-cost-unit">'+fmtMoney(t.costPerUnit)+'</span></div>' +
-      '<div class="totals-row"><span>Markup ('+esc(c.markupPct||0)+'%)</span><span class="mono" id="pc-out-markup">'+fmtMoney(t.markupAmount)+'</span></div>' +
-      '<div class="totals-row"><span>Price per unit</span><span class="mono" id="pc-out-price-unit">'+fmtMoney(t.pricePerUnit)+'</span></div>' +
-      '<div class="totals-row total"><span id="pc-out-total-label">Total ('+esc(t.quantity)+' × '+fmtMoney(t.pricePerUnit)+')</span><span class="mono" id="pc-out-total">'+fmtMoney(t.totalPrice)+'</span></div>' +
-      '</div>';
-
-    html += '<div class="actions-row" style="margin-top:16px;">' +
-      '<button type="button" class="btn btn-primary" id="pc-create-quote-btn">Create quote from this</button>' +
-      '<button type="button" class="btn" id="pc-create-invoice-btn">Create invoice from this</button>' +
-      '</div>';
-    html += '<p class="hint" style="margin-top:8px;">Rates start from your saved defaults (edit them anytime in Settings) but you can tweak them here for just this job.</p>';
-
-    html += '</div>';
-    return html;
-  }
-  function updatePrintCalcOutputs(){
-    var t = printCalcTotals();
-    var set = function(id, val){ var el = document.getElementById(id); if(el) el.textContent = val; };
-    set('pc-out-material', fmtMoney(t.materialCost));
-    set('pc-out-machine', fmtMoney(t.machineCost));
-    set('pc-out-labor', fmtMoney(t.laborCost));
-    set('pc-out-cost-unit', fmtMoney(t.costPerUnit));
-    set('pc-out-markup', fmtMoney(t.markupAmount));
-    set('pc-out-price-unit', fmtMoney(t.pricePerUnit));
-    set('pc-out-total', fmtMoney(t.totalPrice));
-    set('pc-out-total-label', 'Total (' + t.quantity + ' × ' + fmtMoney(t.pricePerUnit) + ')');
-  }
-  function wireDashboardEvents(){
-    var bind = function(id, key, isNumber){
-      var el = document.getElementById(id);
-      if(!el) return;
-      el.addEventListener('input', function(){
-        printCalc[key] = isNumber ? this.value : this.value;
-        updatePrintCalcOutputs();
-      });
-    };
-    bind('pc-job-name','jobName');
-    bind('pc-weight','weightGrams', true);
-    bind('pc-filament-price','filamentPricePerKg', true);
-    bind('pc-print-hours','printHours', true);
-    bind('pc-printer-rate','printerCostPerHour', true);
-    bind('pc-labor-hours','laborHours', true);
-    bind('pc-labor-rate','laborRatePerHour', true);
-    bind('pc-quantity','quantity', true);
-    bind('pc-markup','markupPct', true);
-
-    // markup % is echoed in a totals row label, so re-render (not just recompute) when it changes
-    var markupEl = document.getElementById('pc-markup');
-    if(markupEl) markupEl.addEventListener('change', function(){ render(); });
-
-    var clientSel = document.getElementById('pc-client');
-    if(clientSel) clientSel.addEventListener('change', function(){ printCalc.clientId = this.value; });
-
-    var resetBtn = document.getElementById('pc-reset-btn');
-    if(resetBtn) resetBtn.addEventListener('click', function(){ printCalc = blankPrintCalc(); render(); });
-
-    function startDocFromCalc(kind){
-      var t = printCalcTotals();
-      if(t.pricePerUnit <= 0){ alertBanner('Enter at least a filament weight, print time or labor time first.'); return; }
-      var desc = (printCalc.jobName || '').trim() || '3D printing job';
-      var item = { description: desc, qty: t.quantity, unitPrice: Math.round(t.pricePerUnit * 100) / 100 };
-      go('newDoc', { kind: kind, prefillItem: item, clientId: printCalc.clientId || '' });
-    }
-    var quoteBtn = document.getElementById('pc-create-quote-btn');
-    if(quoteBtn) quoteBtn.addEventListener('click', function(){ startDocFromCalc('quote'); });
-    var invoiceBtn = document.getElementById('pc-create-invoice-btn');
-    if(invoiceBtn) invoiceBtn.addEventListener('click', function(){ startDocFromCalc('invoice'); });
   }
 
   function statCard(label, value, tone){
@@ -1052,6 +1157,567 @@
     return html;
   }
 
+  /* ---------- printers ---------- */
+  function renderPrinters(){
+    var html = '<div class="view-head"><div><h1>Printers</h1><div class="view-sub">Machine cost is calculated from purchase price, expected life and maintenance — not a guess</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-modal="printer">+ Add printer</button></div></div>';
+
+    html += '<div class="card">';
+    if(!printers.length){
+      html += emptyState('🖨️','No printers yet','Add a printer with its purchase price and expected life so the calculator can work out its true hourly cost.', [
+        {label:'Add printer', modal:'printer', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Manufacturer / model</th><th>Purchase price</th><th>Power</th><th>Machine cost / hr</th><th>Active</th><th></th></tr></thead><tbody>';
+      printers.forEach(function(p){
+        var mc = printerMachineRate(p);
+        html += '<tr>' +
+          '<td>' + esc(p.name) + '</td>' +
+          '<td>' + esc((p.manufacturer||'')+(p.model?(' '+p.model):'')||'—') + '</td>' +
+          '<td class="mono">' + fmtMoney(p.purchasePrice) + '</td>' +
+          '<td class="mono">' + (Number(p.powerWatts)||0) + ' W</td>' +
+          '<td class="mono">' + fmtMoney(mc.hourlyRate) + (p.useManualHourlyCost ? ' <span class="hint">(manual)</span>' : ' <span class="hint">(auto)</span>') + '</td>' +
+          '<td>' + (p.active===false ? '<span class="badge badge-draft">Inactive</span>' : '<span class="badge badge-paid">Active</span>') + '</td>' +
+          '<td style="text-align:right; white-space:nowrap;">';
+        if(uiConfirm === 'printer-' + p.id){
+          html += '<span class="confirm-inline">Delete? <button class="btn btn-sm btn-danger" data-confirm-delete-printer="'+p.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+        } else {
+          html += '<button class="btn btn-sm btn-ghost" data-edit-printer="'+p.id+'">Edit</button> ' +
+            '<button class="btn btn-sm btn-ghost btn-danger" data-ask-delete-printer="'+p.id+'">Delete</button>';
+        }
+        html += '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- materials ---------- */
+  function renderMaterials(){
+    var html = '<div class="view-head"><div><h1>Materials</h1><div class="view-sub">Filament price per kg by material and colour — feeds the calculator directly</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-modal="material">+ Add material</button></div></div>';
+
+    html += '<div class="card">';
+    if(!materials.length){
+      html += emptyState('🧵','No materials yet','Add your filaments so the calculator can price each colour correctly.', [
+        {label:'Add material', modal:'material', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Type</th><th>Colour</th><th>Supplier</th><th>Price / kg</th><th>Stock</th><th>Low stock alert</th><th>Active</th><th></th></tr></thead><tbody>';
+      materials.forEach(function(m){
+        var low = (Number(m.stockG)||0) <= (Number(m.reorderLevelG)||0);
+        html += '<tr>' +
+          '<td>' + esc(m.materialType||'—') + '</td>' +
+          '<td>' + esc(m.colour||'—') + '</td>' +
+          '<td>' + esc(m.supplier||'—') + '</td>' +
+          '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
+          '<td class="mono">' + (Number(m.stockG)||0) + ' g' + (low ? ' <span class="badge badge-overdue">Low</span>' : '') + '</td>' +
+          '<td class="mono">' + (Number(m.reorderLevelG)||0) + ' g</td>' +
+          '<td>' + (m.active===false ? '<span class="badge badge-draft">Inactive</span>' : '<span class="badge badge-paid">Active</span>') + '</td>' +
+          '<td style="text-align:right; white-space:nowrap;">';
+        if(uiConfirm === 'material-' + m.id){
+          html += '<span class="confirm-inline">Delete? <button class="btn btn-sm btn-danger" data-confirm-delete-material="'+m.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+        } else {
+          html += '<button class="btn btn-sm btn-ghost" data-edit-material="'+m.id+'">Edit</button> ' +
+            '<button class="btn btn-sm btn-ghost btn-danger" data-ask-delete-material="'+m.id+'">Delete</button>';
+        }
+        html += '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- consumables ---------- */
+  function renderConsumables(){
+    var html = '<div class="view-head"><div><h1>Consumables</h1><div class="view-sub">Keyrings, packaging, stickers and anything else that goes into a finished job</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-modal="consumable">+ Add consumable</button></div></div>';
+
+    html += '<div class="card">';
+    if(!consumables.length){
+      html += emptyState('📦','No consumables yet','Add the parts and packaging you buy in bulk so job costing can include them automatically.', [
+        {label:'Add consumable', modal:'consumable', primary:true}
+      ]);
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Category</th><th>Supplier</th><th>Purchased as</th><th>Unit cost</th><th>Stock</th><th>Active</th><th></th></tr></thead><tbody>';
+      consumables.forEach(function(c){
+        var unitCost = (Number(c.purchasePrice)||0) / Math.max(1, Number(c.purchaseQuantity)||1);
+        var low = (Number(c.stockQuantity)||0) <= (Number(c.reorderLevel)||0);
+        html += '<tr>' +
+          '<td>' + esc(c.name) + '</td>' +
+          '<td>' + esc(c.category||'—') + '</td>' +
+          '<td>' + esc(c.supplier||'—') + '</td>' +
+          '<td class="mono">' + (Number(c.purchaseQuantity)||0) + ' @ ' + fmtMoney(c.purchasePrice) + '</td>' +
+          '<td class="mono">' + fmtMoney(unitCost) + '</td>' +
+          '<td class="mono">' + (Number(c.stockQuantity)||0) + (low ? ' <span class="badge badge-overdue">Low</span>' : '') + '</td>' +
+          '<td>' + (c.active===false ? '<span class="badge badge-draft">Inactive</span>' : '<span class="badge badge-paid">Active</span>') + '</td>' +
+          '<td style="text-align:right; white-space:nowrap;">';
+        if(uiConfirm === 'consumable-' + c.id){
+          html += '<span class="confirm-inline">Delete? <button class="btn btn-sm btn-danger" data-confirm-delete-consumable="'+c.id+'">Yes</button><button class="btn btn-sm" data-cancel-confirm="1">No</button></span>';
+        } else {
+          html += '<button class="btn btn-sm btn-ghost" data-edit-consumable="'+c.id+'">Edit</button> ' +
+            '<button class="btn btn-sm btn-ghost btn-danger" data-ask-delete-consumable="'+c.id+'">Delete</button>';
+        }
+        html += '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- calculator ---------- */
+  function cField(id,label,value,opts){
+    opts = opts || {};
+    var type = opts.type || 'text';
+    var step = opts.step ? ' step="'+opts.step+'"' : '';
+    return '<div class="field"><label>'+esc(label)+'</label>' +
+      '<input id="'+id+'" type="'+type+'"' + (type!=='text'?'':' inputmode="decimal"') + step + ' value="'+esc(value)+'"' + (opts.placeholder?' placeholder="'+esc(opts.placeholder)+'"':'') + (opts.readonly?' readonly':'') + '></div>';
+  }
+  function statusMeta(status){
+    if(status==='green') return {label:'Good price', cls:'badge-paid'};
+    if(status==='yellow') return {label:'Low margin', cls:'badge-sent'};
+    return {label:'Losing money', cls:'badge-overdue'};
+  }
+  function renderCalculator(){
+    if(!calc) calc = blankCalc();
+    var r = calcResult();
+    var activeMaterials = materials.filter(function(m){ return m.active !== false; });
+    var activeConsumables = consumables.filter(function(c){ return c.active !== false; });
+    var activePrinters = printers.filter(function(p){ return p.active !== false; });
+
+    var html = '<div class="view-head"><div><h1>Calculator</h1><div class="view-sub">Cost a job accurately, see every markup instantly, and turn it straight into a quote or invoice</div></div>' +
+      '<div class="actions-row"><button type="button" class="btn btn-sm btn-ghost" id="calc-reset-btn">Reset calculator</button></div></div>';
+
+    if(!activePrinters.length || !activeMaterials.length){
+      html += '<div class="banner">⚠️ ' + (!activePrinters.length ? 'Add an active printer' : 'Add an active material') + ' before costing a job — see the ' + (!activePrinters.length?'Printers':'Materials') + ' tab.</div>';
+    }
+
+    /* ---- job details ---- */
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Job details</h3>';
+    html += '<div class="field-row">';
+    html += cField('calc-job-name','Job / part name', calc.jobName, {placeholder:'e.g. Pretty Reckless Keychain'});
+    html += '<div class="field"><label>Customer <span style="font-weight:400; color:var(--ink-faint);">— optional, needed to save a quote/invoice</span></label><select id="calc-client">' +
+      '<option value="">Choose a customer…</option>' +
+      clients.map(function(cl){ return '<option value="'+cl.id+'"'+(calc.clientId===cl.id?' selected':'')+'>'+esc(cl.name)+(cl.company?' — '+esc(cl.company):'')+'</option>'; }).join('') +
+      '</select></div>';
+    html += '</div>';
+    html += '<div class="field-row">';
+    html += cField('calc-quantity','Quantity', calc.quantity, {type:'number', step:'1'});
+    html += '<div class="field"><label>Printer</label><select id="calc-printer">' +
+      (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(calc.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') +
+      '</select></div>';
+    html += '</div>';
+    html += '<div class="field"><label>Calculation type</label><select id="calc-calctype" style="max-width:260px;">' +
+      '<option value="single"'+(calc.calcType==='single'?' selected':'')+'>Single job</option>' +
+      '<option value="plate"'+(calc.calcType==='plate'?' selected':'')+'>Per plate (bulk production)</option>' +
+      '</select></div>';
+    html += '</div>';
+
+    /* ---- production ---- */
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Production</h3>';
+    if(calc.calcType === 'plate'){
+      html += '<div class="field-row">';
+      html += cField('calc-units-per-plate','Units per plate', calc.unitsPerPlate, {type:'number', step:'1', placeholder:'e.g. 18'});
+      html += '<div class="field"><label>Number of plates <span style="font-weight:400; color:var(--ink-faint);">— auto</span></label><input type="text" value="'+r.plates+'" readonly id="calc-out-plates"></div>';
+      html += '</div>';
+      html += '<div class="field-row">';
+      html += cField('calc-print-time-per-plate','Print time per plate (hours)', calc.printTimePerPlate, {type:'number', step:'0.01', placeholder:'e.g. 3.5'});
+      html += '<div class="field"><label>Total production time</label><input type="text" value="'+r.totalPrintHours.toFixed(2)+' hours" readonly id="calc-out-total-hours"></div>';
+      html += '</div>';
+    } else {
+      html += '<div class="field-row">';
+      html += cField('calc-print-time-hours','Print time (hours)', calc.printTimeHours, {type:'number', step:'0.01', placeholder:'e.g. 7.9'});
+      html += '<div class="field"><label>Total production time</label><input type="text" value="'+r.totalPrintHours.toFixed(2)+' hours" readonly id="calc-out-total-hours"></div>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    /* ---- filament ---- */
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament / materials</h3>';
+    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.') + ' Prices come from your Materials database.</p>';
+    if(!activeMaterials.length){
+      html += '<p class="hint">No active materials yet — add one on the Materials tab.</p>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th><th>Grams</th><th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
+      activeMaterials.forEach(function(m){
+        var g = calc.filamentGrams[m.id] || '';
+        html += '<tr data-material-id="'+m.id+'">' +
+          '<td>' + esc(m.colour) + '</td>' +
+          '<td>' + esc(m.materialType||'—') + '</td>' +
+          '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'"></td>' +
+          '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
+          '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '<div class="field-row" style="margin-top:14px;">';
+    html += cField('calc-waste-pct','Waste (%)', calc.wastePct, {type:'number', step:'0.1'});
+    html += cField('calc-failure-pct','Failure allowance (%)', calc.failureAllowancePct, {type:'number', step:'0.1'});
+    html += '</div>';
+    html += '<div class="totals" style="margin-top:6px;">' +
+      '<div class="totals-row"><span>Total filament used</span><span class="mono" id="calc-out-filament-raw">'+ (0).toFixed(1) +' g</span></div>' +
+      '<div class="totals-row"><span>Costed filament (incl. waste)</span><span class="mono" id="calc-out-filament-costed">'+ (0).toFixed(1) +' g</span></div>' +
+      '<div class="totals-row total"><span>Filament cost</span><span class="mono" id="calc-out-filament-cost">'+fmtMoney(0)+'</span></div>' +
+      '</div>';
+    html += '</div>';
+
+    /* ---- advanced costs ---- */
+    html += '<details class="card card-pad" style="margin-bottom:18px;" id="calc-advanced"' + (calcAdvancedOpen?' open':'') + '>';
+    html += '<summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--ink-soft);">Advanced costs — labour, post-processing, consumables, packaging &amp; other</summary>';
+    html += '<div style="margin-top:16px;">';
+
+    html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Include labour</span><label class="switch"><input type="checkbox" id="calc-labour-enabled" '+(calc.labourEnabled?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>';
+    if(calc.labourEnabled){
+      html += '<div class="field-row">';
+      html += cField('calc-labour-hours','Labour hours', calc.labourHours, {type:'number', step:'0.1'});
+      html += cField('calc-labour-rate','Labour rate (R / hour)', calc.labourRate, {type:'number', step:'1'});
+      html += '</div>';
+    }
+
+    html += '<h4 style="font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:18px 0 10px;">Post-processing</h4>';
+    html += renderCostRowsTable('pp', calc.postProcessing, 'Description', 'e.g. Remove supports, sand, assemble');
+    html += '<button type="button" class="btn btn-sm" data-add-cost-row="pp" style="margin-top:8px;">+ Add post-processing cost</button>';
+
+    html += '<h4 style="font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:22px 0 10px;">Consumables used</h4>';
+    if(!activeConsumables.length){
+      html += '<p class="hint">No active consumables yet — add one on the Consumables tab.</p>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Consumable</th><th>Quantity</th><th>Unit cost</th><th class="num-cell">Cost</th><th></th></tr></thead><tbody id="calc-consumables-body">';
+      calc.consumablesUsed.forEach(function(row,i){
+        var c = consumables.find(function(x){return x.id===row.consumableId;});
+        var unitCost = c ? (Number(c.purchasePrice)||0)/Math.max(1,Number(c.purchaseQuantity)||1) : 0;
+        html += '<tr data-idx="'+i+'">' +
+          '<td><select class="calc-cons-select">' + activeConsumables.map(function(ac){ return '<option value="'+ac.id+'"'+(row.consumableId===ac.id?' selected':'')+'>'+esc(ac.name)+'</option>'; }).join('') + '</select></td>' +
+          '<td><input class="calc-cons-qty mono" type="number" min="0" step="1" value="'+(row.quantity||'')+'"></td>' +
+          '<td class="mono" data-unit-cost>' + fmtMoney(unitCost) + '</td>' +
+          '<td class="num-cell mono" data-row-cost>' + fmtMoney((Number(row.quantity)||0)*unitCost) + '</td>' +
+          '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-cost-row="consumable" data-idx="'+i+'">✕</button></td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '<button type="button" class="btn btn-sm" data-add-cost-row="consumable" style="margin-top:8px;"'+(!activeConsumables.length?' disabled':'')+'>+ Add consumable</button>';
+
+    html += '<h4 style="font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:22px 0 10px;">Packaging</h4>';
+    html += cField('calc-packaging','Packaging cost (R)', calc.packagingAmount, {type:'number', step:'1'});
+
+    html += '<h4 style="font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:22px 0 10px;">Other costs</h4>';
+    html += renderCostRowsTable('other', calc.otherCosts, 'Description', 'e.g. Shipping, special packaging');
+    html += '<button type="button" class="btn btn-sm" data-add-cost-row="other" style="margin-top:8px;">+ Add other cost</button>';
+
+    html += '</div></details>';
+
+    /* ---- cost summary ---- */
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Cost summary</h3>';
+    html += '<div class="totals" style="width:100%; max-width:360px;">' +
+      costRow('Filament', 'calc-out-cs-filament', r.filamentCost) +
+      costRow('Electricity', 'calc-out-cs-electricity', r.electricityCost) +
+      costRow('Machine', 'calc-out-cs-machine', r.machineCost) +
+      costRow('Labour', 'calc-out-cs-labour', r.labourCost) +
+      costRow('Post-processing', 'calc-out-cs-pp', r.postProcessingCost) +
+      costRow('Consumables', 'calc-out-cs-consumables', r.consumablesCost) +
+      costRow('Packaging', 'calc-out-cs-packaging', r.packagingCost) +
+      costRow('Other', 'calc-out-cs-other', r.otherCost) +
+      '<div class="totals-row total"><span>Total cost</span><span class="mono" id="calc-out-total-cost">'+fmtMoney(r.totalCost)+'</span></div>' +
+      '<div class="totals-row"><span>Cost per unit</span><span class="mono" id="calc-out-cost-per-unit">'+fmtMoney(r.costPerUnit)+'</span></div>' +
+      '</div>';
+    html += '</div>';
+
+    /* ---- selling prices ---- */
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Selling prices</h3>';
+    html += '<p class="hint" style="margin-bottom:12px;">Markup is on cost; margin is on selling price — they are not the same number.</p>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Markup</th><th class="num-cell">Price / unit</th><th class="num-cell">Price (order)</th><th class="num-cell">Profit / unit</th><th class="num-cell">Margin</th><th></th></tr></thead><tbody id="calc-markup-body">';
+    r.markupRows.forEach(function(row){
+      html += '<tr data-pct="'+row.pct+'">' +
+        '<td>' + row.pct + '%</td>' +
+        '<td class="num-cell mono" data-f="priceUnit">' + fmtMoney(row.priceUnit) + '</td>' +
+        '<td class="num-cell mono" data-f="priceTotal">' + fmtMoney(row.priceTotal) + '</td>' +
+        '<td class="num-cell mono" data-f="profitUnit">' + fmtMoney(row.profitUnit) + '</td>' +
+        '<td class="num-cell mono" data-f="marginPct">' + row.marginPct.toFixed(1) + '%</td>' +
+        '<td style="text-align:right;"><button type="button" class="btn btn-sm btn-ghost" data-use-markup="'+row.pct+'">Use</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div class="field-row" style="margin-top:14px;">';
+    html += '<div class="field"><label>Price rounding</label><select id="calc-rounding">' +
+      ['none:No rounding','1:Nearest R1','5:Nearest R5','10:Nearest R10','custom:Custom'].map(function(o){
+        var parts = o.split(':'); return '<option value="'+parts[0]+'"'+(calc.rounding===parts[0]?' selected':'')+'>'+parts[1]+'</option>';
+      }).join('') + '</select></div>';
+    html += cField('calc-rounding-custom','Custom rounding step (R)', calc.roundingCustom, {type:'number', step:'0.5'});
+    html += '</div>';
+    html += '</div>';
+
+    /* ---- custom selling price ---- */
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Custom selling price</h3>';
+    html += '<p class="hint" style="margin-bottom:12px;">Calculated price at your default markup (' + esc(spSettings.defaultMarkup) + '%): <strong id="calc-out-calculated-price" class="mono">' + fmtMoney((r.markupRows.filter(function(x){return x.pct===Number(spSettings.defaultMarkup);})[0]||r.markupRows[0]||{priceUnit:0}).priceUnit) + '</strong> / unit. Leave blank to use that.</p>';
+    html += cField('calc-custom-price','Your selling price (R / unit)', calc.customPrice, {type:'number', step:'0.01', placeholder:'e.g. 13.00'});
+    html += '<div class="totals" style="margin-top:12px; width:100%; max-width:360px;">' +
+      '<div class="totals-row"><span>Revenue (order)</span><span class="mono" id="calc-out-custom-revenue">'+fmtMoney(r.activeSelection.priceTotal)+'</span></div>' +
+      '<div class="totals-row"><span>Total cost (order)</span><span class="mono" id="calc-out-custom-cost">'+fmtMoney(r.totalCost)+'</span></div>' +
+      '<div class="totals-row total"><span>Profit (order)</span><span class="mono" id="calc-out-custom-profit">'+fmtMoney(r.activeSelection.profitTotal)+'</span></div>' +
+      '<div class="totals-row"><span>Actual markup</span><span class="mono" id="calc-out-custom-markup">'+r.activeSelection.actualMarkupPct.toFixed(1)+'%</span></div>' +
+      '<div class="totals-row"><span>Actual margin</span><span class="mono" id="calc-out-custom-margin">'+r.activeSelection.marginPct.toFixed(1)+'%</span></div>' +
+      '</div>';
+    html += '</div>';
+
+    /* ---- break-even + order vs unit ---- */
+    var sm = statusMeta(r.status);
+    html += '<div class="card card-pad" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Break-even &amp; price check</h3>';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Break-even price / unit</label><input type="text" value="'+fmtMoney(r.breakEvenPerUnit)+'" readonly id="calc-out-breakeven"></div>';
+    html += '<div class="field"><label>Against minimum margin (' + esc(spSettings.minimumMarginPct) + '%)</label><div style="padding-top:6px;"><span class="badge '+sm.cls+'" id="calc-status-badge">'+sm.label+'</span></div></div>';
+    html += '</div>';
+
+    html += '<div class="grid grid-2" style="margin-top:8px;">';
+    html += '<div class="card card-pad"><div class="stat-label" style="margin-bottom:10px;">Order (' + r.quantity + ' units)</div>' +
+      '<div class="totals-row"><span>Cost</span><span class="mono" id="calc-out-order-cost">'+fmtMoney(r.totalCost)+'</span></div>' +
+      '<div class="totals-row"><span>Selling</span><span class="mono" id="calc-out-order-selling">'+fmtMoney(r.activeSelection.priceTotal)+'</span></div>' +
+      '<div class="totals-row total"><span>Profit</span><span class="mono" id="calc-out-order-profit">'+fmtMoney(r.activeSelection.profitTotal)+'</span></div></div>';
+    html += '<div class="card card-pad"><div class="stat-label" style="margin-bottom:10px;">Per unit</div>' +
+      '<div class="totals-row"><span>Cost</span><span class="mono" id="calc-out-unit-cost">'+fmtMoney(r.costPerUnit)+'</span></div>' +
+      '<div class="totals-row"><span>Selling</span><span class="mono" id="calc-out-unit-selling">'+fmtMoney(r.activeSelection.priceUnit)+'</span></div>' +
+      '<div class="totals-row total"><span>Profit</span><span class="mono" id="calc-out-unit-profit">'+fmtMoney(r.activeSelection.profitUnit)+'</span></div></div>';
+    html += '</div>';
+    html += '</div>';
+
+    /* ---- actions ---- */
+    html += '<div class="card card-pad">';
+    html += '<div class="actions-row">' +
+      '<button type="button" class="btn btn-primary" id="calc-create-quote-btn">Create quote from this</button>' +
+      '<button type="button" class="btn" id="calc-create-invoice-btn">Create invoice from this</button>' +
+      '</div>';
+    html += '<p class="hint" style="margin-top:8px;">Uses your custom price if set, otherwise the default markup (' + esc(spSettings.defaultMarkup) + '%). Saved quotes with full cost history are coming in a future update — for now this creates a document the same way the old print calculator did.</p>';
+    html += '</div>';
+
+    return html;
+  }
+  function costRow(label, id, value){
+    return '<div class="totals-row"><span>'+label+'</span><span class="mono" id="'+id+'">'+fmtMoney(value)+'</span></div>';
+  }
+  function renderCostRowsTable(prefix, rows, descLabel, descPlaceholder){
+    if(!rows.length) return '<p class="hint">None added.</p>';
+    var html = '<div class="table-wrap"><table><thead><tr><th>'+descLabel+'</th><th class="num-cell">Amount</th><th></th></tr></thead><tbody id="calc-'+prefix+'-body">';
+    rows.forEach(function(row,i){
+      html += '<tr data-idx="'+i+'">' +
+        '<td><input class="calc-cost-desc" type="text" value="'+esc(row.description)+'" placeholder="'+esc(descPlaceholder)+'"></td>' +
+        '<td><input class="calc-cost-amount mono" type="number" min="0" step="0.01" value="'+(row.amount||0)+'"></td>' +
+        '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-cost-row="'+prefix+'" data-idx="'+i+'">✕</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+  function updateCalcOutputs(){
+    var r = calcResult();
+    var set = function(id, val){ var el = document.getElementById(id); if(el) el.textContent = val; };
+
+    var platesEl = document.getElementById('calc-out-plates'); if(platesEl) platesEl.value = String(r.plates);
+    var hoursEl = document.getElementById('calc-out-total-hours'); if(hoursEl) hoursEl.value = r.totalPrintHours.toFixed(2) + ' hours';
+
+    var costByMaterial = {};
+    r.filamentLines.forEach(function(l){ costByMaterial[l.materialId] = l.cost; });
+    materials.forEach(function(m){
+      var cell = document.getElementById('calc-fil-cost-'+m.id);
+      if(cell) cell.textContent = fmtMoney(costByMaterial[m.id] || 0);
+    });
+    set('calc-out-filament-raw', r.totalFilamentRawG.toFixed(1) + ' g');
+    set('calc-out-filament-costed', r.totalFilamentCostedG.toFixed(1) + ' g');
+    set('calc-out-filament-cost', fmtMoney(r.filamentCost));
+
+    var consBody = document.getElementById('calc-consumables-body');
+    if(consBody){
+      Array.prototype.forEach.call(consBody.querySelectorAll('tr'), function(tr){
+        var idx = Number(tr.getAttribute('data-idx'));
+        var row = calc.consumablesUsed[idx]; if(!row) return;
+        var c = consumables.find(function(x){return x.id===row.consumableId;});
+        var unitCost = c ? (Number(c.purchasePrice)||0)/Math.max(1,Number(c.purchaseQuantity)||1) : 0;
+        var uc = tr.querySelector('[data-unit-cost]'); if(uc) uc.textContent = fmtMoney(unitCost);
+        var rc = tr.querySelector('[data-row-cost]'); if(rc) rc.textContent = fmtMoney((Number(row.quantity)||0)*unitCost);
+      });
+    }
+
+    set('calc-out-cs-filament', fmtMoney(r.filamentCost));
+    set('calc-out-cs-electricity', fmtMoney(r.electricityCost));
+    set('calc-out-cs-machine', fmtMoney(r.machineCost));
+    set('calc-out-cs-labour', fmtMoney(r.labourCost));
+    set('calc-out-cs-pp', fmtMoney(r.postProcessingCost));
+    set('calc-out-cs-consumables', fmtMoney(r.consumablesCost));
+    set('calc-out-cs-packaging', fmtMoney(r.packagingCost));
+    set('calc-out-cs-other', fmtMoney(r.otherCost));
+    set('calc-out-total-cost', fmtMoney(r.totalCost));
+    set('calc-out-cost-per-unit', fmtMoney(r.costPerUnit));
+
+    var mbody = document.getElementById('calc-markup-body');
+    if(mbody){
+      r.markupRows.forEach(function(row){
+        var tr = mbody.querySelector('tr[data-pct="'+row.pct+'"]'); if(!tr) return;
+        var setF = function(f,val){ var el = tr.querySelector('[data-f="'+f+'"]'); if(el) el.textContent = val; };
+        setF('priceUnit', fmtMoney(row.priceUnit));
+        setF('priceTotal', fmtMoney(row.priceTotal));
+        setF('profitUnit', fmtMoney(row.profitUnit));
+        setF('marginPct', row.marginPct.toFixed(1)+'%');
+      });
+    }
+
+    var defaultRow = r.markupRows.filter(function(x){return x.pct===Number(spSettings.defaultMarkup);})[0] || r.markupRows[0];
+    set('calc-out-calculated-price', fmtMoney(defaultRow ? defaultRow.priceUnit : 0));
+
+    set('calc-out-custom-revenue', fmtMoney(r.activeSelection.priceTotal));
+    set('calc-out-custom-cost', fmtMoney(r.totalCost));
+    set('calc-out-custom-profit', fmtMoney(r.activeSelection.profitTotal));
+    set('calc-out-custom-markup', r.activeSelection.actualMarkupPct.toFixed(1)+'%');
+    set('calc-out-custom-margin', r.activeSelection.marginPct.toFixed(1)+'%');
+
+    var beEl = document.getElementById('calc-out-breakeven'); if(beEl) beEl.value = fmtMoney(r.breakEvenPerUnit);
+    var sm = statusMeta(r.status);
+    var badge = document.getElementById('calc-status-badge');
+    if(badge){ badge.textContent = sm.label; badge.className = 'badge ' + sm.cls; }
+
+    set('calc-out-order-cost', fmtMoney(r.totalCost));
+    set('calc-out-order-selling', fmtMoney(r.activeSelection.priceTotal));
+    set('calc-out-order-profit', fmtMoney(r.activeSelection.profitTotal));
+    set('calc-out-unit-cost', fmtMoney(r.costPerUnit));
+    set('calc-out-unit-selling', fmtMoney(r.activeSelection.priceUnit));
+    set('calc-out-unit-profit', fmtMoney(r.activeSelection.profitUnit));
+  }
+  function wireCalculatorEvents(){
+    var advancedEl = document.getElementById('calc-advanced');
+    if(advancedEl) advancedEl.addEventListener('toggle', function(){ calcAdvancedOpen = this.open; });
+
+    var bindLight = function(id, key, cb){
+      var el = document.getElementById(id);
+      if(!el) return;
+      el.addEventListener('input', function(){ calc[key] = this.value; updateCalcOutputs(); if(cb) cb(); });
+    };
+    bindLight('calc-job-name','jobName');
+    bindLight('calc-quantity','quantity');
+    bindLight('calc-units-per-plate','unitsPerPlate');
+    bindLight('calc-print-time-per-plate','printTimePerPlate');
+    bindLight('calc-print-time-hours','printTimeHours');
+    bindLight('calc-waste-pct','wastePct');
+    bindLight('calc-failure-pct','failureAllowancePct');
+    bindLight('calc-labour-hours','labourHours');
+    bindLight('calc-labour-rate','labourRate');
+    bindLight('calc-packaging','packagingAmount');
+    bindLight('calc-custom-price','customPrice');
+    bindLight('calc-rounding-custom','roundingCustom');
+
+    var clientSel = document.getElementById('calc-client');
+    if(clientSel) clientSel.addEventListener('change', function(){ calc.clientId = this.value; });
+
+    var printerSel = document.getElementById('calc-printer');
+    if(printerSel) printerSel.addEventListener('change', function(){
+      calc.printerId = this.value;
+      var p = printers.find(function(x){return x.id===calc.printerId;});
+      calc.wastePct = p ? (Number(p.defaultWastePct)||0) : calc.wastePct;
+      render();
+    });
+
+    var calcTypeSel = document.getElementById('calc-calctype');
+    if(calcTypeSel) calcTypeSel.addEventListener('change', function(){ calc.calcType = this.value; render(); });
+
+    var roundingSel = document.getElementById('calc-rounding');
+    if(roundingSel) roundingSel.addEventListener('change', function(){ calc.rounding = this.value; render(); });
+
+    var labourToggle = document.getElementById('calc-labour-enabled');
+    if(labourToggle) labourToggle.addEventListener('change', function(){ calc.labourEnabled = this.checked; render(); });
+
+    var filBody = document.getElementById('calc-fil-body');
+    if(filBody) filBody.addEventListener('input', function(e){
+      if(!e.target.classList.contains('calc-fil-input')) return;
+      var mid = e.target.getAttribute('data-material-id');
+      calc.filamentGrams[mid] = e.target.value;
+      updateCalcOutputs();
+    });
+
+    ['pp','other'].forEach(function(prefix){
+      var body = document.getElementById('calc-'+prefix+'-body');
+      if(body) body.addEventListener('input', function(e){
+        var tr = e.target.closest('tr'); if(!tr) return;
+        var idx = Number(tr.getAttribute('data-idx'));
+        var list = prefix==='pp' ? calc.postProcessing : calc.otherCosts;
+        if(!list[idx]) return;
+        if(e.target.classList.contains('calc-cost-desc')) list[idx].description = e.target.value;
+        if(e.target.classList.contains('calc-cost-amount')) list[idx].amount = Number(e.target.value)||0;
+        updateCalcOutputs();
+      });
+    });
+
+    var consBody = document.getElementById('calc-consumables-body');
+    if(consBody){
+      consBody.addEventListener('input', function(e){
+        var tr = e.target.closest('tr'); if(!tr) return;
+        var idx = Number(tr.getAttribute('data-idx'));
+        var row = calc.consumablesUsed[idx]; if(!row) return;
+        if(e.target.classList.contains('calc-cons-qty')) row.quantity = Number(e.target.value)||0;
+        updateCalcOutputs();
+      });
+      consBody.addEventListener('change', function(e){
+        if(!e.target.classList.contains('calc-cons-select')) return;
+        var tr = e.target.closest('tr'); var idx = Number(tr.getAttribute('data-idx'));
+        var row = calc.consumablesUsed[idx]; if(!row) return;
+        row.consumableId = e.target.value;
+        updateCalcOutputs();
+      });
+    }
+
+    document.querySelectorAll('[data-add-cost-row]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var type = btn.getAttribute('data-add-cost-row');
+        if(type==='pp') calc.postProcessing.push({description:'', amount:0});
+        else if(type==='other') calc.otherCosts.push({description:'', amount:0});
+        else if(type==='consumable') calc.consumablesUsed.push({consumableId: (consumables.filter(function(c){return c.active!==false;})[0]||{}).id || '', quantity:1});
+        render();
+      });
+    });
+    document.querySelectorAll('[data-remove-cost-row]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var type = btn.getAttribute('data-remove-cost-row');
+        var idx = Number(btn.getAttribute('data-idx'));
+        if(type==='pp') calc.postProcessing.splice(idx,1);
+        else if(type==='other') calc.otherCosts.splice(idx,1);
+        else if(type==='consumable') calc.consumablesUsed.splice(idx,1);
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-use-markup]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var pct = Number(btn.getAttribute('data-use-markup'));
+        var row = calcResult().markupRows.filter(function(x){return x.pct===pct;})[0];
+        if(row){ calc.customPrice = String(row.priceUnit); render(); }
+      });
+    });
+
+    var resetBtn = document.getElementById('calc-reset-btn');
+    if(resetBtn) resetBtn.addEventListener('click', function(){ calc = blankCalc(); render(); });
+
+    function startDocFromCalc(kind){
+      var res = calcResult();
+      if(res.activeSelection.priceUnit <= 0){ alertBanner('Enter at least a filament weight or print time first.'); return; }
+      var desc = (calc.jobName || '').trim() || '3D printing job';
+      var item = { description: desc, qty: res.quantity, unitPrice: Math.round(res.activeSelection.priceUnit * 100) / 100 };
+      go('newDoc', { kind: kind, prefillItem: item, clientId: calc.clientId || '' });
+    }
+    var quoteBtn = document.getElementById('calc-create-quote-btn');
+    if(quoteBtn) quoteBtn.addEventListener('click', function(){ startDocFromCalc('quote'); });
+    var invoiceBtn = document.getElementById('calc-create-invoice-btn');
+    if(invoiceBtn) invoiceBtn.addEventListener('click', function(){ startDocFromCalc('invoice'); });
+
+    updateCalcOutputs();
+  }
+
   /* ---------- settings ---------- */
   function renderSettings(){
     var b = business;
@@ -1092,18 +1758,27 @@
     html += '</form></div>';
 
     html += '<div class="card card-pad" style="margin-top:20px;">';
-    html += '<form id="printcalc-form">';
-    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">3D print calculator defaults</h3>';
-    html += '<p class="hint" style="margin-bottom:14px;">Used to pre-fill the print job calculator on your Dashboard. You can still override any of these for a specific job.</p>';
+    html += '<form id="solidprints-form">';
+    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">🖨️ Solid Prints — costing settings</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Used across the Calculator, Printers, Materials and Consumables to work out cost and price. You can still override most of these for a specific job.</p>';
     html += fieldRow([
-      field('filamentPricePerKg','Filament price (per kg)', printCalcSettings.filamentPricePerKg, 'text'),
-      field('printerCostPerHour','Printer cost per hour — power & wear', printCalcSettings.printerCostPerHour, 'text')
+      field('electricityRate','Electricity rate (R / kWh)', spSettings.electricityRate, 'text'),
+      field('defaultLabourRate','Default labour rate (R / hour)', spSettings.defaultLabourRate, 'text')
     ]);
     html += fieldRow([
-      field('laborRatePerHour','Labor rate (per hour)', printCalcSettings.laborRatePerHour, 'text'),
-      field('markupPct','Default markup (%)', printCalcSettings.markupPct, 'text')
+      field('markups','Available markups (%, comma-separated)', spSettings.markups.join(', '), 'text'),
+      field('defaultMarkup','Default markup shown as "the" price (%)', spSettings.defaultMarkup, 'text')
     ]);
-    html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save print calculator defaults</button></div>';
+    html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Allow a custom markup per job</span><label class="switch"><input type="checkbox" name="customMarkupAllowed" ' + (spSettings.customMarkupAllowed?'checked':'') + '><span class="track"></span><span class="thumb"></span></label></div>';
+    html += fieldRow([
+      field('defaultWastePct','Default waste (%)', spSettings.defaultWastePct, 'text'),
+      field('defaultPackaging','Default packaging cost (R)', spSettings.defaultPackaging, 'text')
+    ]);
+    html += fieldRow([
+      field('minimumMarginPct','Minimum acceptable margin (%)', spSettings.minimumMarginPct, 'text'),
+      '<div class="field"><label>Labour on by default?</label><div class="switch-row"><span style="font-size:13.5px;">Include labour in new calculations</span><label class="switch"><input type="checkbox" name="defaultLabourOn" ' + (spSettings.defaultLabourOn?'checked':'') + '><span class="track"></span><span class="thumb"></span></label></div></div>'
+    ]);
+    html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save Solid Prints settings</button></div>';
     html += '</form></div>';
     return html;
   }
@@ -1890,6 +2565,112 @@
         render();
       });
     }
+    else if(modal.type === 'printer'){
+      var pr = modal.editingId ? printers.find(function(x){return x.id===modal.editingId;}) : {name:'',manufacturer:'',model:'',purchasePrice:0,purchaseDate:todayISO(),powerWatts:200,expectedLifeHours:10000,maintenancePerHour:0,manualHourlyCost:0,useManualHourlyCost:false,defaultWastePct:0,active:true};
+      root.innerHTML = '<div class="modal-backdrop" id="modal-backdrop"><div class="modal">' +
+        '<h2>'+(modal.editingId?'Edit printer':'Add printer')+'</h2>' +
+        '<form id="printer-form">' +
+        field('p-name','Name', pr.name, 'text') +
+        fieldRow([field('p-manufacturer','Manufacturer', pr.manufacturer, 'text'), field('p-model','Model', pr.model, 'text')]) +
+        fieldRow([field('p-purchase-price','Purchase price (R)', pr.purchasePrice, 'number'), field('p-purchase-date','Purchase date', pr.purchaseDate, 'date')]) +
+        fieldRow([field('p-power','Power consumption (W)', pr.powerWatts, 'number'), field('p-life','Expected useful life (hours)', pr.expectedLifeHours, 'number')]) +
+        fieldRow([field('p-maintenance','Maintenance cost / hour (R)', pr.maintenancePerHour, 'number'), field('p-waste','Default waste for this printer (%)', pr.defaultWastePct, 'number')]) +
+        '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Use a manual hourly cost instead of calculating it</span><label class="switch"><input type="checkbox" id="p-manual-toggle" name="useManualHourlyCost" '+(pr.useManualHourlyCost?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
+        '<div id="p-manual-cost-wrap" style="'+(pr.useManualHourlyCost?'':'display:none;')+'">' + field('p-manual-cost','Manual hourly cost (R / hour)', pr.manualHourlyCost, 'number') + '</div>' +
+        '<div class="switch-row" style="margin-bottom:6px;"><span style="font-size:13.5px; font-weight:600;">Active</span><label class="switch"><input type="checkbox" name="active" '+(pr.active!==false?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
+        '<div class="actions-row" style="justify-content:flex-end; margin-top:16px;">' +
+        '<button type="button" class="btn" id="modal-cancel">Cancel</button>' +
+        '<button type="submit" class="btn btn-primary">Save printer</button>' +
+        '</div></form></div></div>';
+
+      document.getElementById('modal-cancel').addEventListener('click', function(){ modal=null; render(); });
+      document.getElementById('modal-backdrop').addEventListener('click', function(e){ if(e.target.id==='modal-backdrop'){ modal=null; render(); } });
+      var manualToggle = document.getElementById('p-manual-toggle');
+      if(manualToggle) manualToggle.addEventListener('change', function(){
+        document.getElementById('p-manual-cost-wrap').style.display = this.checked ? '' : 'none';
+      });
+      document.getElementById('printer-form').addEventListener('submit', function(e){
+        e.preventDefault();
+        var fd = new FormData(e.target);
+        var data = {
+          name: fd.get('p-name')||'', manufacturer: fd.get('p-manufacturer')||'', model: fd.get('p-model')||'',
+          purchasePrice: Number(fd.get('p-purchase-price'))||0, purchaseDate: fd.get('p-purchase-date')||'',
+          powerWatts: Number(fd.get('p-power'))||0, expectedLifeHours: Number(fd.get('p-life'))||1,
+          maintenancePerHour: Number(fd.get('p-maintenance'))||0, defaultWastePct: Number(fd.get('p-waste'))||0,
+          useManualHourlyCost: fd.get('useManualHourlyCost')==='on', manualHourlyCost: Number(fd.get('p-manual-cost'))||0,
+          active: fd.get('active')==='on'
+        };
+        if(!data.name.trim()) return;
+        savePrinter(data, modal.editingId);
+        modal = null; render();
+      });
+    }
+    else if(modal.type === 'material'){
+      var mt = modal.editingId ? materials.find(function(x){return x.id===modal.editingId;}) : {materialType:'PLA',colour:'',supplier:'',pricePerKg:0,spoolWeightG:1000,stockG:0,reorderLevelG:0,active:true};
+      var colourOptions = ['White','Black','Grey','Red','Pink','Purple','Blue','Green','Brown','Orange'];
+      root.innerHTML = '<div class="modal-backdrop" id="modal-backdrop"><div class="modal">' +
+        '<h2>'+(modal.editingId?'Edit material':'Add material')+'</h2>' +
+        '<form id="material-form">' +
+        fieldRow([
+          '<div class="field"><label>Material type</label><input name="m-type" list="material-type-options" value="'+esc(mt.materialType)+'"><datalist id="material-type-options">'+['PLA','PETG','TPU','Silk PLA','Matte PLA','Other'].map(function(t){return '<option value="'+t+'">';}).join('')+'</datalist></div>',
+          '<div class="field"><label>Colour</label><input name="m-colour" list="material-colour-options" value="'+esc(mt.colour)+'"><datalist id="material-colour-options">'+colourOptions.map(function(c){return '<option value="'+c+'">';}).join('')+'</datalist></div>'
+        ]) +
+        field('m-supplier','Supplier', mt.supplier, 'text') +
+        fieldRow([field('m-price','Price per kg (R)', mt.pricePerKg, 'number'), field('m-spool','Spool weight (g)', mt.spoolWeightG, 'number')]) +
+        fieldRow([field('m-stock','Current stock (g)', mt.stockG, 'number'), field('m-reorder','Low stock alert level (g)', mt.reorderLevelG, 'number')]) +
+        '<div class="switch-row" style="margin-bottom:6px;"><span style="font-size:13.5px; font-weight:600;">Active</span><label class="switch"><input type="checkbox" name="active" '+(mt.active!==false?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
+        '<div class="actions-row" style="justify-content:flex-end; margin-top:16px;">' +
+        '<button type="button" class="btn" id="modal-cancel">Cancel</button>' +
+        '<button type="submit" class="btn btn-primary">Save material</button>' +
+        '</div></form></div></div>';
+
+      document.getElementById('modal-cancel').addEventListener('click', function(){ modal=null; render(); });
+      document.getElementById('modal-backdrop').addEventListener('click', function(e){ if(e.target.id==='modal-backdrop'){ modal=null; render(); } });
+      document.getElementById('material-form').addEventListener('submit', function(e){
+        e.preventDefault();
+        var fd = new FormData(e.target);
+        var data = {
+          materialType: fd.get('m-type')||'', colour: fd.get('m-colour')||'', supplier: fd.get('m-supplier')||'',
+          pricePerKg: Number(fd.get('m-price'))||0, spoolWeightG: Number(fd.get('m-spool'))||0,
+          stockG: Number(fd.get('m-stock'))||0, reorderLevelG: Number(fd.get('m-reorder'))||0,
+          active: fd.get('active')==='on'
+        };
+        if(!data.colour.trim()) return;
+        saveMaterial(data, modal.editingId);
+        modal = null; render();
+      });
+    }
+    else if(modal.type === 'consumable'){
+      var cu = modal.editingId ? consumables.find(function(x){return x.id===modal.editingId;}) : {name:'',category:'',supplier:'',purchaseQuantity:1,purchasePrice:0,stockQuantity:0,reorderLevel:0,active:true};
+      root.innerHTML = '<div class="modal-backdrop" id="modal-backdrop"><div class="modal">' +
+        '<h2>'+(modal.editingId?'Edit consumable':'Add consumable')+'</h2>' +
+        '<form id="consumable-form">' +
+        fieldRow([field('cs-name','Name', cu.name, 'text'), field('cs-category','Category', cu.category, 'text')]) +
+        field('cs-supplier','Supplier', cu.supplier, 'text') +
+        fieldRow([field('cs-purchase-qty','Purchased in quantities of', cu.purchaseQuantity, 'number'), field('cs-purchase-price','Purchase price for that quantity (R)', cu.purchasePrice, 'number')]) +
+        fieldRow([field('cs-stock','Current stock', cu.stockQuantity, 'number'), field('cs-reorder','Reorder level', cu.reorderLevel, 'number')]) +
+        '<div class="switch-row" style="margin-bottom:6px;"><span style="font-size:13.5px; font-weight:600;">Active</span><label class="switch"><input type="checkbox" name="active" '+(cu.active!==false?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>' +
+        '<div class="actions-row" style="justify-content:flex-end; margin-top:16px;">' +
+        '<button type="button" class="btn" id="modal-cancel">Cancel</button>' +
+        '<button type="submit" class="btn btn-primary">Save consumable</button>' +
+        '</div></form></div></div>';
+
+      document.getElementById('modal-cancel').addEventListener('click', function(){ modal=null; render(); });
+      document.getElementById('modal-backdrop').addEventListener('click', function(e){ if(e.target.id==='modal-backdrop'){ modal=null; render(); } });
+      document.getElementById('consumable-form').addEventListener('submit', function(e){
+        e.preventDefault();
+        var fd = new FormData(e.target);
+        var data = {
+          name: fd.get('cs-name')||'', category: fd.get('cs-category')||'', supplier: fd.get('cs-supplier')||'',
+          purchaseQuantity: Number(fd.get('cs-purchase-qty'))||1, purchasePrice: Number(fd.get('cs-purchase-price'))||0,
+          stockQuantity: Number(fd.get('cs-stock'))||0, reorderLevel: Number(fd.get('cs-reorder'))||0,
+          active: fd.get('active')==='on'
+        };
+        if(!data.name.trim()) return;
+        saveConsumable(data, modal.editingId);
+        modal = null; render();
+      });
+    }
   }
 
   /* ============================================================
@@ -1918,6 +2699,27 @@
     if(askDelClient){ uiConfirm = 'client-' + askDelClient.getAttribute('data-ask-delete-client'); render(); return; }
     var confirmDelClient = e.target.closest('[data-confirm-delete-client]');
     if(confirmDelClient){ deleteClient(confirmDelClient.getAttribute('data-confirm-delete-client')); uiConfirm=null; render(); return; }
+
+    var editPrinterBtn = e.target.closest('[data-edit-printer]');
+    if(editPrinterBtn){ modal = {type:'printer', editingId: editPrinterBtn.getAttribute('data-edit-printer')}; render(); return; }
+    var askDelPrinter = e.target.closest('[data-ask-delete-printer]');
+    if(askDelPrinter){ uiConfirm = 'printer-' + askDelPrinter.getAttribute('data-ask-delete-printer'); render(); return; }
+    var confirmDelPrinter = e.target.closest('[data-confirm-delete-printer]');
+    if(confirmDelPrinter){ deletePrinter(confirmDelPrinter.getAttribute('data-confirm-delete-printer')); uiConfirm=null; render(); return; }
+
+    var editMaterialBtn = e.target.closest('[data-edit-material]');
+    if(editMaterialBtn){ modal = {type:'material', editingId: editMaterialBtn.getAttribute('data-edit-material')}; render(); return; }
+    var askDelMaterial = e.target.closest('[data-ask-delete-material]');
+    if(askDelMaterial){ uiConfirm = 'material-' + askDelMaterial.getAttribute('data-ask-delete-material'); render(); return; }
+    var confirmDelMaterial = e.target.closest('[data-confirm-delete-material]');
+    if(confirmDelMaterial){ deleteMaterial(confirmDelMaterial.getAttribute('data-confirm-delete-material')); uiConfirm=null; render(); return; }
+
+    var editConsumableBtn = e.target.closest('[data-edit-consumable]');
+    if(editConsumableBtn){ modal = {type:'consumable', editingId: editConsumableBtn.getAttribute('data-edit-consumable')}; render(); return; }
+    var askDelConsumable = e.target.closest('[data-ask-delete-consumable]');
+    if(askDelConsumable){ uiConfirm = 'consumable-' + askDelConsumable.getAttribute('data-ask-delete-consumable'); render(); return; }
+    var confirmDelConsumable = e.target.closest('[data-confirm-delete-consumable]');
+    if(confirmDelConsumable){ deleteConsumable(confirmDelConsumable.getAttribute('data-confirm-delete-consumable')); uiConfirm=null; render(); return; }
 
     var askDelDoc = e.target.closest('[data-ask-delete-doc]');
     if(askDelDoc){ uiConfirm = 'doc-' + askDelDoc.getAttribute('data-ask-delete-doc'); render(); return; }
@@ -1969,15 +2771,24 @@
       saveBusiness(data);
       alertBanner('Settings saved.');
     }
-    if(e.target.id === 'printcalc-form'){
+    if(e.target.id === 'solidprints-form'){
       e.preventDefault();
       var pfd = new FormData(e.target);
-      var pdata = {};
-      ['filamentPricePerKg','printerCostPerHour','laborRatePerHour','markupPct'].forEach(function(k){
-        pdata[k] = Number(pfd.get(k)) || 0;
-      });
-      savePrintCalcSettings(pdata);
-      alertBanner('Print calculator defaults saved.');
+      var markupsList = String(pfd.get('markups')||'').split(',').map(function(s){ return Number(s.trim()); }).filter(function(n){ return !isNaN(n) && n>=0; });
+      if(!markupsList.length) markupsList = [100,125,150,175,200];
+      var pdata = {
+        electricityRate: Number(pfd.get('electricityRate'))||0,
+        defaultLabourRate: Number(pfd.get('defaultLabourRate'))||0,
+        markups: markupsList,
+        defaultMarkup: Number(pfd.get('defaultMarkup'))||markupsList[0],
+        customMarkupAllowed: pfd.get('customMarkupAllowed') === 'on',
+        defaultWastePct: Number(pfd.get('defaultWastePct'))||0,
+        defaultPackaging: Number(pfd.get('defaultPackaging'))||0,
+        defaultLabourOn: pfd.get('defaultLabourOn') === 'on',
+        minimumMarginPct: Number(pfd.get('minimumMarginPct'))||0
+      };
+      saveSpSettings(pdata);
+      alertBanner('Solid Prints settings saved.');
     }
   });
 
