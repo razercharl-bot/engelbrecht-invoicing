@@ -320,6 +320,57 @@
     try{ return new Intl.NumberFormat('en-ZA', {style:'currency', currency:'ZAR'}).format(n); }
     catch(e){ return 'R ' + n.toFixed(2); }
   }
+  // Grams for a small part, kilograms (2dp) once it's a full kilo or more — matches how
+  // filament is actually bought and tracked (spools are sold/weighed in kg).
+  function fmtGrams(g){
+    g = Number(g)||0;
+    return g >= 1000 ? (g/1000).toFixed(2) + ' kg' : g.toFixed(0) + ' g';
+  }
+  // Groups a quote/invoice's filamentLines (one row per material — effectively per colour,
+  // since each material in the Materials database is a distinct type+colour spool) by
+  // colour, so "White PLA" and "White PETG" both bought as "White" filament show as one
+  // total, with each contributing type still broken out when more than one is mixed in.
+  function filamentColourBreakdown(lines, gramsKey){
+    gramsKey = gramsKey || 'costedGrams';
+    var byColour = {};
+    (lines||[]).forEach(function(l){
+      var key = l.colour || '(no colour)';
+      if(!byColour[key]) byColour[key] = { colour: key, grams: 0, types: {} };
+      var g = Number(l[gramsKey])||0;
+      byColour[key].grams += g;
+      var t = l.materialType || '—';
+      byColour[key].types[t] = (byColour[key].types[t]||0) + g;
+    });
+    return Object.keys(byColour).map(function(k){
+      var entry = byColour[k];
+      var typeKeys = Object.keys(entry.types);
+      entry.typeLabel = typeKeys.length > 1
+        ? typeKeys.map(function(t){ return t + ' ' + fmtGrams(entry.types[t]); }).join(', ')
+        : (typeKeys[0] || '—');
+      return entry;
+    }).sort(function(a,b){ return b.grams - a.grams; });
+  }
+  // Renders the "Filament needed" internal card shared by the Solid Prints quote view and
+  // any invoice that came from one. gramsKey lets callers choose the raw (as-modelled) or
+  // costed (raw + waste, with the failure allowance applied) total — costed is what you'd
+  // actually want loaded on the spool, so it's the default.
+  function renderFilamentNeededCard(lines, totalGrams){
+    if(!lines || !lines.length) return '';
+    var breakdown = filamentColourBreakdown(lines);
+    var html = '<div class="card card-pad no-print" style="margin-bottom:18px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament needed</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Includes waste and failure allowance — internal use, not shown to the client.</p>';
+    html += '<div class="totals" style="margin-bottom:14px; max-width:320px;">' +
+      '<div class="totals-row total"><span>Total filament</span><span class="mono">'+fmtGrams(totalGrams)+'</span></div>' +
+      '</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th><th class="num-cell">Grams</th></tr></thead><tbody>';
+    breakdown.forEach(function(entry){
+      html += '<tr><td>'+esc(entry.colour)+'</td><td>'+esc(entry.typeLabel)+'</td><td class="num-cell mono">'+fmtGrams(entry.grams)+'</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '</div>';
+    return html;
+  }
   function fmtDate(iso){
     if(!iso) return '—';
     var d = new Date(iso + 'T00:00:00');
@@ -866,6 +917,11 @@
     // sets fromQuote, to its own "QUO-####" number) so the Solid Prints Invoices tab can
     // show only invoices that actually came from a Solid Prints quote.
     inv.fromSpQuote = true;
+    // Carries the filament breakdown across so "how much filament is needed" stays visible
+    // on the invoice too, not just the quote it came from.
+    inv.filamentLines = q.filamentLines || [];
+    inv.totalFilamentRawG = q.totalFilamentRawG || 0;
+    inv.totalFilamentCostedG = q.totalFilamentCostedG || 0;
     inv.number = nextNumber('invoice');
     inv.createdAt = new Date().toISOString();
     var toSave = Object.assign({}, inv); delete toSave.id;
@@ -1232,7 +1288,10 @@
       createdAt: null,
       convertedToInvoice: null,
       fromQuote: null,
-      fromSpQuote: false
+      fromSpQuote: false,
+      filamentLines: [],
+      totalFilamentRawG: 0,
+      totalFilamentCostedG: 0
     };
   }
   function loadDraftFrom(d){
@@ -2672,6 +2731,8 @@
     html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
     html += '</div></div>';
 
+    html += renderFilamentNeededCard(q.filamentLines, q.totalFilamentCostedG);
+
     /* internal cost breakdown — not part of the printable client sheet */
     html += '<div class="card card-pad no-print" style="margin-top:18px;">';
     html += '<h3 style="font-size:14px; margin-bottom:14px; color:var(--ink-soft);">Internal cost breakdown (frozen at save time)</h3>';
@@ -2742,7 +2803,12 @@
       html += '<div class="card card-pad">';
       html += '<div class="view-head" style="margin-bottom:12px;">';
       html += '<div><div style="font-weight:700; font-size:14.5px;">'+esc(q.jobName||'Untitled job')+' <span style="font-weight:400; color:var(--ink-faint); font-size:12.5px;">'+esc(q.quoteNumber||'')+'</span></div>';
-      html += '<div class="hint">'+esc(spQuoteClientLabel(q))+' · Qty '+totalQty+(q.startDate?' · Started '+fmtDate(q.startDate):' · No start date set')+'</div></div>';
+      html += '<div class="hint">'+esc(spQuoteClientLabel(q))+' · Qty '+totalQty+(q.startDate?' · Started '+fmtDate(q.startDate):' · No start date set')+'</div>';
+      if(q.filamentLines && q.filamentLines.length){
+        var wsBreakdown = filamentColourBreakdown(q.filamentLines);
+        html += '<div class="hint">🧵 '+fmtGrams(q.totalFilamentCostedG)+' — '+wsBreakdown.map(function(e){ return esc(e.colour)+' '+fmtGrams(e.grams); }).join(', ')+'</div>';
+      }
+      html += '</div>';
       html += '<div>'+spQuoteStatusBadge(q.status)+'</div>';
       html += '</div>';
 
@@ -3141,6 +3207,9 @@
 
     html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
     html += '</div></div>';
+
+    html += renderFilamentNeededCard(d.filamentLines, d.totalFilamentCostedG);
+
     return html;
   }
   function statusButtons(d){
