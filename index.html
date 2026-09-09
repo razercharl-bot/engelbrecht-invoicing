@@ -2232,7 +2232,7 @@
       var partsForFil = (calc.parts && calc.parts.length) ? calc.parts : [blankPart()];
       html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th>' +
         partsForFil.map(function(part, i){
-          return '<th>' + esc(part.name || ('Part ' + (i+1))) + ' (g/plate)</th>';
+          return '<th id="calc-fil-part-header-'+i+'">' + esc(part.name || ('Part ' + (i+1))) + ' (g/plate)</th>';
         }).join('') +
         '<th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
       activeMaterials.forEach(function(m){
@@ -2693,8 +2693,14 @@
         else if(e.target.classList.contains('calc-part-waste')) part.wasteGrams = e.target.value;
         else return;
         // A name edit doesn't affect plates/hours/filament cost math, but it IS the filament
-        // matrix's column header just below — needs a full re-render to pick it up.
-        if(e.target.classList.contains('calc-part-name')) render(); else updateCalcOutputs();
+        // matrix's column header just below — updated directly here (not via a full render())
+        // because innerHTML-rebuilding the whole Calculator on every keystroke destroys and
+        // recreates this very input, which drops keyboard focus after each character typed.
+        if(e.target.classList.contains('calc-part-name')){
+          var headerEl = document.getElementById('calc-fil-part-header-'+idx);
+          if(headerEl) headerEl.textContent = (part.name || ('Part ' + (idx+1))) + ' (g/plate)';
+        }
+        updateCalcOutputs();
       });
       partsBody.addEventListener('change', function(e){
         if(!e.target.classList.contains('calc-part-printer')) return;
