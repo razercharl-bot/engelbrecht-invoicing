@@ -437,7 +437,7 @@
   var calcAdvancedOpen = false; // whether the Calculator's advanced-costs <details> is expanded (persisted across re-renders)
   var calcEditingQuoteId = null; // set while the calculator is editing an existing Draft quote, so Save updates it in place
   var spQuotes = [];         // saved Solid Prints quotes — each doc is a full, frozen cost snapshot (see freezeQuoteFromCalc)
-  var quoteFilter = { status: '', clientId: '', printerId: '', minProfit: '', maxProfit: '', from: '', to: '' };
+  var quoteFilter = { status: '', billingStatus: '', clientId: '', printerId: '', minProfit: '', maxProfit: '', from: '', to: '' };
   var worksheetShowAll = false; // Work Sheet defaults to just in-production orders (Accepted/Printing); toggle to also see Completed ones
 
   function defaultSpSettings(){
@@ -475,8 +475,16 @@
       // (how many go on which printer) is worked out automatically to balance finish
       // time, though each leg's quantity can still be hand-adjusted afterward.
       splitEnabled: false,
-      printerSplits: []                // {printerId, quantity, unitsPerPlate, printTimePerPlate, wasteGrams}
+      printerSplits: [],               // {printerId, quantity, unitsPerPlate, printTimePerPlate, wasteGrams}
+      // Some items are assembled from more than one printed part (e.g. a lid + a base) —
+      // each part gets its own plate size/time/waste/filament, all needed to finish ONE
+      // ordered unit. Only used when calcType === 'parts' (mutually exclusive with the
+      // printer split above — every part here prints on the single printer selected).
+      parts: []                        // {name, qtyPerUnit, unitsPerPlate, printTimePerPlate, wasteGrams, filamentGrams}
     };
+  }
+  function blankPart(){
+    return { name: '', qtyPerUnit: 1, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: spSettings.defaultWasteGrams, filamentGrams: {} };
   }
   function blankPrinterSplitLeg(){
     var p = printers.find(function(x){ return x.active !== false; });
@@ -771,6 +779,99 @@
       breakEvenPerUnit: costPerUnit, minMargin: pricing.minMargin, status: pricing.status
     };
   }
+  /* Costs an item that's assembled from more than one printed part (e.g. a lid + a base) —
+     every part is needed to finish ONE ordered unit, each with its own plate size/time/waste/
+     filament, but all printed on the single printer chosen for the job (unlike the printer
+     split above, which spreads ONE part across several machines). Reuses computeJobCost per
+     part (and once more for order-level costs) exactly like computeSplitJobCost does for legs,
+     so the two features share the same aggregation shape and every downstream renderer (quote
+     view, filament card, Work Sheet, invoice) needs no changes to understand either. */
+  function computeMultiPartJobCost(job, printer, materialsById, consumablesById, settings){
+    var quantity = Math.max(1, Number(job.quantity)||1);
+    var parts = (job.parts && job.parts.length) ? job.parts : [blankPart()];
+    var failureAllowancePct = Number(job.failureAllowancePct)||0;
+
+    var partResults = parts.map(function(part){
+      var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
+      var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
+      var partQtyNeeded = quantity * qtyPerUnit;
+      var plates = Math.ceil(partQtyNeeded / unitsPerPlate);
+      var printTimePerPlate = Number(part.printTimePerPlate)||0;
+      // Grams-per-PLATE for THIS part, same convention as the printer split's per-leg grams —
+      // straight off the slicer for that part's own plate.
+      var partGramsPerPlate = part.filamentGrams || {};
+      var partFilamentGrams = {};
+      Object.keys(partGramsPerPlate).forEach(function(mid){
+        var perPlate = Number(partGramsPerPlate[mid])||0;
+        if(perPlate) partFilamentGrams[mid] = perPlate * plates;
+      });
+      var partJob = {
+        calcType: 'single', quantity: partQtyNeeded, filamentGrams: partFilamentGrams,
+        wasteGrams: (Number(part.wasteGrams)||0) * plates, failureAllowancePct: failureAllowancePct,
+        printTimeHours: plates * printTimePerPlate,
+        labourEnabled: false, postProcessing: [], consumablesUsed: [], packagingAmount: 0, otherCosts: [],
+        customPrice: '', rounding: 'none', roundingCustom: ''
+      };
+      var r = computeJobCost(partJob, printer, materialsById, {}, settings);
+      return {
+        name: part.name || '', qtyPerUnit: qtyPerUnit, qtyNeeded: partQtyNeeded, unitsPerPlate: unitsPerPlate, plates: plates,
+        printTimePerPlate: printTimePerPlate, totalPrintHours: r.totalPrintHours,
+        wasteGramsPerPlate: Number(part.wasteGrams)||0,
+        filamentLines: r.filamentLines, filamentCost: r.filamentCost,
+        electricityCost: r.electricityCost, machineCost: r.machineCost, machineHourlyRate: r.machineHourlyRate
+      };
+    });
+
+    var orderLevelJob = {
+      calcType: 'single', quantity: 1, filamentGrams: {}, wasteGrams: 0, failureAllowancePct: 0, printTimeHours: 0,
+      labourEnabled: !!job.labourEnabled, labourHours: job.labourHours, labourRate: job.labourRate,
+      postProcessing: job.postProcessing, consumablesUsed: job.consumablesUsed, packagingAmount: job.packagingAmount, otherCosts: job.otherCosts,
+      customPrice: '', rounding: 'none', roundingCustom: ''
+    };
+    var orderR = computeJobCost(orderLevelJob, null, materialsById, consumablesById, settings);
+
+    // Parts all print on the one printer selected for the job, one after another — so unlike
+    // legs (which run in parallel on separate machines), total print hours is a straight sum
+    // and there's no separate "turnaround" figure.
+    var totalPrintHours = partResults.reduce(function(s,p){ return s + p.totalPrintHours; }, 0);
+    var filamentCost = partResults.reduce(function(s,p){ return s + p.filamentCost; }, 0);
+    var electricityCost = partResults.reduce(function(s,p){ return s + p.electricityCost; }, 0);
+    var machineCost = partResults.reduce(function(s,p){ return s + p.machineCost; }, 0);
+
+    var filamentLinesById = {};
+    partResults.forEach(function(part){
+      part.filamentLines.forEach(function(l){
+        var existing = filamentLinesById[l.materialId];
+        if(existing){
+          existing.grams += l.grams; existing.costedGrams += l.costedGrams; existing.cost += l.cost;
+        } else {
+          filamentLinesById[l.materialId] = { materialId:l.materialId, colour:l.colour, materialType:l.materialType, grams:l.grams, costedGrams:l.costedGrams, pricePerKg:l.pricePerKg, cost:l.cost };
+        }
+      });
+    });
+    var filamentLines = Object.keys(filamentLinesById).map(function(k){ return filamentLinesById[k]; });
+    var totalFilamentRawG = filamentLines.reduce(function(s,l){ return s + l.grams; }, 0);
+    var totalFilamentCostedG = filamentLines.reduce(function(s,l){ return s + l.costedGrams; }, 0);
+
+    var totalCost = filamentCost + electricityCost + machineCost + orderR.labourCost + orderR.postProcessingCost + orderR.consumablesCost + orderR.packagingCost + orderR.otherCost;
+    var costPerUnit = totalCost / quantity;
+    var pricing = deriveMarkupsAndStatus(costPerUnit, quantity, job, settings);
+
+    return {
+      isMultiPart: true, parts: partResults,
+      quantity: quantity, plates: partResults.reduce(function(s,p){ return s + p.plates; }, 0), isPlate: true, totalPrintHours: totalPrintHours,
+      totalFilamentRawG: totalFilamentRawG, totalFilamentCostedG: totalFilamentCostedG,
+      filamentLines: filamentLines, filamentCost: filamentCost,
+      electricityCost: electricityCost, electricityRate: Number(settings.electricityRate)||0, powerKw: 0,
+      machineCost: machineCost, machineHourlyRate: 0, depreciationPerHour: 0, maintenancePerHour: 0,
+      labourCost: orderR.labourCost, postProcessingCost: orderR.postProcessingCost,
+      consumablesLines: orderR.consumablesLines, consumablesCost: orderR.consumablesCost,
+      packagingCost: orderR.packagingCost, otherCost: orderR.otherCost,
+      totalCost: totalCost, costPerUnit: costPerUnit,
+      markupRows: pricing.markupRows, customPrice: pricing.customPrice, activeSelection: pricing.activeSelection,
+      breakEvenPerUnit: costPerUnit, minMargin: pricing.minMargin, status: pricing.status
+    };
+  }
   function calcMaterialsById(){ var m={}; materials.forEach(function(x){ m[x.id]=x; }); return m; }
   function calcConsumablesById(){ var m={}; consumables.forEach(function(x){ m[x.id]=x; }); return m; }
   function calcPrintersById(){ var m={}; printers.forEach(function(x){ m[x.id]=x; }); return m; }
@@ -780,6 +881,9 @@
       return computeSplitJobCost(calc, calcPrintersById(), calcMaterialsById(), calcConsumablesById(), spSettings);
     }
     var printer = printers.find(function(p){ return p.id === calc.printerId; }) || null;
+    if(calc.calcType === 'parts'){
+      return computeMultiPartJobCost(calc, printer, calcMaterialsById(), calcConsumablesById(), spSettings);
+    }
     return computeJobCost(calc, printer, calcMaterialsById(), calcConsumablesById(), spSettings);
   }
 
@@ -821,6 +925,17 @@
         machineCost: l.machineCost, machineHourlyRate: l.machineHourlyRate
       }; }) : [],
       printerSplitsInput: isSplit ? JSON.parse(JSON.stringify(calc.printerSplits || [])) : [],
+      // Frozen per-part breakdown (only when calcType 'parts') — mirrors `legs`/`printerSplitsInput`
+      // above: `parts` is what each part actually contributed (for the quote's internal display),
+      // `partsInput` is the raw editable rows so "Edit in Calculator" can reload them.
+      isMultiPart: calc.calcType === 'parts',
+      parts: calc.calcType === 'parts' ? r.parts.map(function(p){ return {
+        name: p.name, qtyPerUnit: p.qtyPerUnit, qtyNeeded: p.qtyNeeded, unitsPerPlate: p.unitsPerPlate,
+        plates: p.plates, printTimePerPlate: p.printTimePerPlate, totalPrintHours: p.totalPrintHours,
+        wasteGramsPerPlate: p.wasteGramsPerPlate, filamentCost: p.filamentCost, electricityCost: p.electricityCost,
+        machineCost: p.machineCost, machineHourlyRate: p.machineHourlyRate
+      }; }) : [],
+      partsInput: calc.calcType === 'parts' ? JSON.parse(JSON.stringify(calc.parts || [])) : [],
       filamentLines: r.filamentLines, filamentGramsInput: JSON.parse(JSON.stringify(calc.filamentGrams || {})),
       wasteGrams: Number(calc.wasteGrams)||0, failureAllowancePct: Number(calc.failureAllowancePct)||0,
       totalFilamentRawG: r.totalFilamentRawG, totalFilamentCostedG: r.totalFilamentCostedG, filamentCost: r.filamentCost,
@@ -871,6 +986,7 @@
     if(calcEditingQuoteId){
       var existing = spQuotes.find(function(q){ return q.id === calcEditingQuoteId; });
       snap.status = existing ? existing.status : 'Draft';
+      snap.billingStatus = existing ? quoteBillingStatus(existing) : 'Not invoiced';
       snap.quoteNumber = existing ? existing.quoteNumber : nextSpQuoteNumber();
       snap.createdAt = existing ? existing.createdAt : now;
       snap.updatedAt = now;
@@ -881,6 +997,7 @@
       go('spQuoteView', { id: calcEditingQuoteId });
     } else {
       snap.status = 'Draft';
+      snap.billingStatus = 'Not invoiced';
       snap.quoteNumber = nextSpQuoteNumber();
       snap.createdAt = now; snap.updatedAt = now;
       snap.completedQuantity = 0;
@@ -891,12 +1008,21 @@
       });
     }
   }
-  function setSpQuoteStatus(id, status){
+  // Production status (Draft…Completed/Cancelled) and billing status (Not invoiced/Invoiced/
+  // Paid) are independent — e.g. an order can be "Printing" and "Invoiced" (paid a deposit
+  // upfront) at the same time. Each has its own setter and its own field on the doc.
+  function setSpQuoteProdStatus(id, status){
     if(!dbNS) return;
     var q = spQuotes.find(function(x){ return x.id === id; });
     if(!q) return;
     dbNS.doc('spQuotes/' + id).update({ status: status, updatedAt: new Date().toISOString() });
-    if(status === 'Invoiced' && !q.convertedToInvoiceNumber){
+  }
+  function setSpQuoteBillingStatus(id, billingStatus){
+    if(!dbNS) return;
+    var q = spQuotes.find(function(x){ return x.id === id; });
+    if(!q) return;
+    dbNS.doc('spQuotes/' + id).update({ billingStatus: billingStatus, updatedAt: new Date().toISOString() });
+    if(billingStatus === 'Invoiced' && !q.convertedToInvoiceNumber){
       createInvoiceFromQuote(q);
     }
   }
@@ -953,7 +1079,8 @@
       customPrice: q.customPriceUsed ? String(q.sellingPricePerUnit) : '',
       rounding: q.rounding || 'none', roundingCustom: q.roundingCustom || '',
       splitEnabled: !!q.isSplit,
-      printerSplits: q.isSplit ? JSON.parse(JSON.stringify(q.printerSplitsInput||[])) : []
+      printerSplits: q.isSplit ? JSON.parse(JSON.stringify(q.printerSplitsInput||[])) : [],
+      parts: q.isMultiPart ? JSON.parse(JSON.stringify(q.partsInput||[])) : []
     };
   }
   function editQuoteInCalculator(q){
@@ -1605,17 +1732,18 @@
     return html;
   }
 
-  // Once a quote is Accepted, it's a real committed job — from then on (Accepted, Printing,
-  // Completed, Invoiced or Paid) it counts toward revenue, profit and printer utilisation on
-  // the dashboard. Draft/Quoted don't count yet (nothing's committed), Cancelled never counts.
-  var COUNTS_TOWARD_DASHBOARD_STATS = ['Accepted','Printing','Completed','Invoiced','Paid'];
+  // Once a quote is Accepted, it's a real committed job — from then on (Accepted, Printing or
+  // Completed) it counts toward revenue, profit and printer utilisation on the dashboard.
+  // Draft/Quoted don't count yet (nothing's committed), Cancelled never counts. This is about
+  // production commitment, not billing — an order counts whether or not it's been invoiced yet.
+  var COUNTS_TOWARD_DASHBOARD_STATS = ['Accepted','Printing','Completed'];
   function renderSpDashboardSection(){
     var monthKey = todayISO().slice(0,7);
     var thisMonthQuotes = spQuotes.filter(function(q){ return (q.quoteDate||'').slice(0,7) === monthKey; });
-    var completedThisMonth = thisMonthQuotes.filter(function(q){ return q.status==='Completed' || q.status==='Invoiced' || q.status==='Paid'; });
+    var completedThisMonth = thisMonthQuotes.filter(function(q){ return quoteProdStatus(q)==='Completed'; });
     var printsThisMonth = completedThisMonth.reduce(function(s,q){ return s + (Number(q.quantity)||0); }, 0);
 
-    var acceptedOrLaterThisMonth = thisMonthQuotes.filter(function(q){ return COUNTS_TOWARD_DASHBOARD_STATS.indexOf(q.status) !== -1; });
+    var acceptedOrLaterThisMonth = thisMonthQuotes.filter(function(q){ return COUNTS_TOWARD_DASHBOARD_STATS.indexOf(quoteProdStatus(q)) !== -1; });
     var revenueThisMonth = acceptedOrLaterThisMonth.reduce(function(s,q){ return s + (Number(q.sellingPriceTotal)||0); }, 0);
     var profitThisMonth = acceptedOrLaterThisMonth.reduce(function(s,q){ return s + (Number(q.profit)||0); }, 0);
 
@@ -1671,7 +1799,7 @@
           '<td>'+esc(spQuoteClientLabel(q))+'</td>' +
           '<td>'+esc(q.jobName)+'</td>' +
           '<td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td>' +
-          '<td>'+spQuoteStatusBadge(q.status)+'</td>' +
+          '<td>'+spQuoteStatusCell(q)+'</td>' +
           '</tr>';
       });
       html += '</tbody></table></div>';
@@ -1933,7 +2061,11 @@
     html += '<div class="field-row">';
     html += '<div class="field"><label>Start date <span style="font-weight:400; color:var(--ink-faint);">— optional, used for the estimated finish date</span></label><input id="calc-start-date" type="date" value="'+esc(calc.startDate||'')+'"></div>';
     html += '</div>';
-    html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Split this job across more than one printer<br><span style="font-weight:400; color:var(--ink-faint); font-size:12px;">Different printers, different build plates — cost each portion against its own machine.</span></span><label class="switch"><input type="checkbox" id="calc-split-enabled" '+(calc.splitEnabled?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>';
+    if(calc.calcType === 'parts'){
+      html += '<p class="hint" style="margin-bottom:14px;">Splitting across printers isn\'t available together with multiple parts yet — switch calculation type below to use it.</p>';
+    } else {
+      html += '<div class="switch-row" style="margin-bottom:14px;"><span style="font-size:13.5px; font-weight:600;">Split this job across more than one printer<br><span style="font-weight:400; color:var(--ink-faint); font-size:12px;">Different printers, different build plates — cost each portion against its own machine.</span></span><label class="switch"><input type="checkbox" id="calc-split-enabled" '+(calc.splitEnabled?'checked':'')+'><span class="track"></span><span class="thumb"></span></label></div>';
+    }
     html += '<div class="field-row">';
     html += cField('calc-quantity', calc.splitEnabled ? 'Total quantity needed' : 'Quantity', calc.quantity, {type:'number', step:'1'});
     if(!calc.splitEnabled){
@@ -1946,11 +2078,42 @@
       html += '<div class="field"><label>Calculation type</label><select id="calc-calctype" style="max-width:260px;">' +
         '<option value="single"'+(calc.calcType==='single'?' selected':'')+'>Single job</option>' +
         '<option value="plate"'+(calc.calcType==='plate'?' selected':'')+'>Per plate (bulk production)</option>' +
+        '<option value="parts"'+(calc.calcType==='parts'?' selected':'')+'>Multiple parts (assembly)</option>' +
         '</select></div>';
     }
     html += '</div>';
 
-    if(calc.splitEnabled){
+    if(calc.calcType === 'parts' && !calc.splitEnabled){
+      /* ---- parts / components ---- */
+      html += '<div class="card card-pad" style="margin-bottom:18px;">';
+      html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Parts</h3>';
+      html += '<p class="hint" style="margin-bottom:12px;">One finished unit needs all of these parts — e.g. a lid and a base. Each gets its own plate size, print time and waste; quantities scale with the order quantity above.</p>';
+      html += '<div class="table-wrap"><table><thead><tr><th>Part name</th><th>Qty / unit</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Plates</th><th>Hours</th><th></th></tr></thead><tbody id="calc-parts-body">';
+      (calc.parts && calc.parts.length ? calc.parts : (calc.parts = [blankPart()])).forEach(function(part, i){
+        var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
+        var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
+        var qtyNeeded = Math.max(0, Number(calc.quantity)||0) * qtyPerUnit;
+        var plates = qtyNeeded > 0 ? Math.ceil(qtyNeeded / unitsPerPlate) : 0;
+        var hours = plates * (Number(part.printTimePerPlate)||0);
+        html += '<tr data-idx="'+i+'">' +
+          '<td><input class="calc-part-name" type="text" style="min-width:120px;" placeholder="e.g. Lid" value="'+esc(part.name)+'"></td>' +
+          '<td><input class="calc-part-qtyperunit mono" type="number" min="1" step="1" style="width:70px;" value="'+(part.qtyPerUnit||1)+'"></td>' +
+          '<td><input class="calc-part-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(part.unitsPerPlate||1)+'"></td>' +
+          '<td><input class="calc-part-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(part.printTimePerPlate)+'"></td>' +
+          '<td><input class="calc-part-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(part.wasteGrams)+'"></td>' +
+          '<td class="num-cell mono" data-part-plates>'+plates+'</td>' +
+          '<td class="num-cell mono" data-part-hours>'+hours.toFixed(2)+'</td>' +
+          '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-part data-idx="'+i+'">✕</button></td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+      html += '<div style="margin-top:8px;"><button type="button" class="btn btn-sm" id="calc-add-part">+ Add part</button></div>';
+      html += '<div class="totals" style="margin-top:14px; max-width:360px;">' +
+        '<div class="totals-row"><span>Total plates</span><span class="mono" id="calc-parts-out-plates">'+r.plates+'</span></div>' +
+        '<div class="totals-row total"><span>Total print hours</span><span class="mono" id="calc-parts-out-hours">'+r.totalPrintHours.toFixed(2)+'</span></div>' +
+        '</div>';
+      html += '</div>';
+    } else if(calc.splitEnabled){
       /* ---- printer split ---- */
       html += '<div class="card card-pad" style="margin-bottom:18px;">';
       html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Printer split</h3>';
@@ -2013,7 +2176,7 @@
     /* ---- filament ---- */
     html += '<div class="card card-pad" style="margin-bottom:18px;">';
     html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament / materials</h3>';
-    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per plate, entered separately for each printer — straight off your slicer for that machine — since the same part can use a different amount (or none) of a material depending on where it prints. Waste differs per printer too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.')) + ' Prices come from your Materials database.</p>';
+    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per plate, entered separately for each printer — straight off your slicer for that machine — since the same part can use a different amount (or none) of a material depending on where it prints. Waste differs per printer too, set above.' : (calc.calcType==='parts' ? 'Grams per plate, entered separately for each part — since a lid and a base can use a different amount (or colour) of filament. Waste differs per part too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.'))) + ' Prices come from your Materials database.</p>';
     if(!activeMaterials.length){
       html += '<p class="hint">No active materials yet — add one on the Materials tab.</p>';
     } else if(calc.splitEnabled){
@@ -2037,6 +2200,26 @@
           '</tr>';
       });
       html += '</tbody></table></div>';
+    } else if(calc.calcType === 'parts'){
+      var partsForFil = (calc.parts && calc.parts.length) ? calc.parts : [blankPart()];
+      html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th>' +
+        partsForFil.map(function(part, i){
+          return '<th>' + esc(part.name || ('Part ' + (i+1))) + ' (g/plate)</th>';
+        }).join('') +
+        '<th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
+      activeMaterials.forEach(function(m){
+        html += '<tr data-material-id="'+m.id+'">' +
+          '<td>' + esc(m.colour) + '</td>' +
+          '<td>' + esc(m.materialType||'—') + '</td>' +
+          partsForFil.map(function(part, i){
+            var g = (part.filamentGrams && part.filamentGrams[m.id]) || '';
+            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'" data-part-idx="'+i+'"></td>';
+          }).join('') +
+          '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
+          '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
     } else {
       html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th><th>Grams</th><th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
       activeMaterials.forEach(function(m){
@@ -2052,7 +2235,7 @@
       html += '</tbody></table></div>';
     }
     html += '<div class="field-row" style="margin-top:14px;">';
-    if(!calc.splitEnabled) html += cField('calc-waste-grams','Waste (grams, from your slicer)', calc.wasteGrams, {type:'number', step:'0.1'});
+    if(!calc.splitEnabled && calc.calcType !== 'parts') html += cField('calc-waste-grams','Waste (grams, from your slicer)', calc.wasteGrams, {type:'number', step:'0.1'});
     html += cField('calc-failure-pct','Failure allowance (%)', calc.failureAllowancePct, {type:'number', step:'0.1'});
     html += '</div>';
     html += '<div class="totals" style="margin-top:6px;">' +
@@ -2244,6 +2427,25 @@
       if(finishCell) finishCell.textContent = legFinishHours.toFixed(2);
     });
   }
+  function refreshPartsRows(){
+    // Same idea as refreshSplitRows() above, but for the parts/components table — updates
+    // each part's auto-computed plates/hours cells in place after a field edit.
+    var body = document.getElementById('calc-parts-body');
+    if(!body || !calc.parts) return;
+    calc.parts.forEach(function(part, i){
+      var tr = body.querySelector('tr[data-idx="'+i+'"]');
+      if(!tr) return;
+      var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
+      var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
+      var qtyNeeded = Math.max(0, Number(calc.quantity)||0) * qtyPerUnit;
+      var plates = qtyNeeded > 0 ? Math.ceil(qtyNeeded / unitsPerPlate) : 0;
+      var hours = plates * (Number(part.printTimePerPlate)||0);
+      var platesCell = tr.querySelector('[data-part-plates]');
+      if(platesCell) platesCell.textContent = String(plates);
+      var hoursCell = tr.querySelector('[data-part-hours]');
+      if(hoursCell) hoursCell.textContent = hours.toFixed(2);
+    });
+  }
   function updateCalcOutputs(){
     var r = calcResult();
     var set = function(id, val){ var el = document.getElementById(id); if(el) el.textContent = val; };
@@ -2251,6 +2453,9 @@
     var platesEl = document.getElementById('calc-out-plates'); if(platesEl) platesEl.value = String(r.plates);
     var hoursEl = document.getElementById('calc-out-total-hours'); if(hoursEl) hoursEl.value = r.totalPrintHours.toFixed(2) + ' hours';
     set('calc-split-out-qty', String(r.quantity));
+    set('calc-parts-out-plates', String(r.plates));
+    set('calc-parts-out-hours', r.totalPrintHours.toFixed(2));
+    refreshPartsRows();
     set('calc-split-out-plates', String(r.plates));
     set('calc-split-out-hours', r.totalPrintHours.toFixed(2));
     set('calc-split-out-turnaround', (r.turnaroundHours||0).toFixed(2));
@@ -2364,7 +2569,14 @@
     });
 
     var calcTypeSel = document.getElementById('calc-calctype');
-    if(calcTypeSel) calcTypeSel.addEventListener('change', function(){ calc.calcType = this.value; render(); });
+    if(calcTypeSel) calcTypeSel.addEventListener('change', function(){
+      calc.calcType = this.value;
+      if(calc.calcType === 'parts'){
+        calc.splitEnabled = false;
+        if(!calc.parts || !calc.parts.length) calc.parts = [blankPart()];
+      }
+      render();
+    });
 
     var splitToggle = document.getElementById('calc-split-enabled');
     if(splitToggle) splitToggle.addEventListener('change', function(){
@@ -2429,6 +2641,37 @@
       });
     });
 
+    var partsBody = document.getElementById('calc-parts-body');
+    if(partsBody){
+      partsBody.addEventListener('input', function(e){
+        var tr = e.target.closest('tr'); if(!tr) return;
+        var idx = Number(tr.getAttribute('data-idx'));
+        var part = calc.parts[idx]; if(!part) return;
+        if(e.target.classList.contains('calc-part-name')) part.name = e.target.value;
+        else if(e.target.classList.contains('calc-part-qtyperunit')) part.qtyPerUnit = e.target.value;
+        else if(e.target.classList.contains('calc-part-upp')) part.unitsPerPlate = e.target.value;
+        else if(e.target.classList.contains('calc-part-time')) part.printTimePerPlate = e.target.value;
+        else if(e.target.classList.contains('calc-part-waste')) part.wasteGrams = e.target.value;
+        else return;
+        // A name edit doesn't affect plates/hours/filament cost math, but it IS the filament
+        // matrix's column header just below — needs a full re-render to pick it up.
+        if(e.target.classList.contains('calc-part-name')) render(); else updateCalcOutputs();
+      });
+    }
+    var addPartBtn = document.getElementById('calc-add-part');
+    if(addPartBtn) addPartBtn.addEventListener('click', function(){
+      calc.parts.push(blankPart());
+      render();
+    });
+    document.querySelectorAll('[data-remove-part]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var idx = Number(btn.getAttribute('data-idx'));
+        calc.parts.splice(idx,1);
+        if(!calc.parts.length) calc.parts.push(blankPart());
+        render();
+      });
+    });
+
     var roundingSel = document.getElementById('calc-rounding');
     if(roundingSel) roundingSel.addEventListener('change', function(){ calc.rounding = this.value; render(); });
 
@@ -2440,11 +2683,17 @@
       if(!e.target.classList.contains('calc-fil-input')) return;
       var mid = e.target.getAttribute('data-material-id');
       var legIdxAttr = e.target.getAttribute('data-leg-idx');
+      var partIdxAttr = e.target.getAttribute('data-part-idx');
       if(legIdxAttr !== null){
         // Split mode — this grams-per-unit value belongs to one specific printer leg.
         var leg = calc.printerSplits[Number(legIdxAttr)]; if(!leg) return;
         if(!leg.filamentGrams) leg.filamentGrams = {};
         leg.filamentGrams[mid] = e.target.value;
+      } else if(partIdxAttr !== null){
+        // Parts mode — this grams-per-plate value belongs to one specific part.
+        var part = calc.parts[Number(partIdxAttr)]; if(!part) return;
+        if(!part.filamentGrams) part.filamentGrams = {};
+        part.filamentGrams[mid] = e.target.value;
       } else {
         calc.filamentGrams[mid] = e.target.value;
       }
@@ -2539,12 +2788,39 @@
     updateCalcOutputs();
   }
 
-  /* ---------- Solid Prints quotes ---------- */
-  var QUOTE_STATUSES = ['Draft','Quoted','Accepted','Printing','Completed','Invoiced','Paid','Cancelled'];
+  /* ---------- Solid Prints quotes ----------
+     Production status and billing status are tracked independently — an order can be
+     "Printing" and "Invoiced" (e.g. a deposit taken upfront) at the same time. `status` on
+     the doc holds the production stage; `billingStatus` holds the billing stage. Both getters
+     below fall back gracefully for quotes saved before billingStatus existed. */
+  var QUOTE_PROD_STATUSES = ['Draft','Quoted','Accepted','Printing','Completed','Cancelled'];
+  var QUOTE_BILLING_STATUSES = ['Not invoiced','Invoiced','Paid'];
+  function quoteProdStatus(q){
+    return QUOTE_PROD_STATUSES.indexOf(q.status) !== -1 ? q.status : 'Completed';
+  }
+  function quoteBillingStatus(q){
+    if(q.billingStatus && QUOTE_BILLING_STATUSES.indexOf(q.billingStatus) !== -1) return q.billingStatus;
+    if(q.status === 'Invoiced') return 'Invoiced'; // pre-split quotes stored billing state in `status`
+    if(q.status === 'Paid') return 'Paid';
+    return 'Not invoiced';
+  }
   function spQuoteStatusBadge(status){
     var cls = {Draft:'badge-draft', Quoted:'badge-quoted', Accepted:'badge-accepted', Printing:'badge-printing',
       Completed:'badge-completed', Invoiced:'badge-invoiced', Paid:'badge-paid', Cancelled:'badge-cancelled'}[status] || 'badge-draft';
     return '<span class="badge ' + cls + '">' + esc(status) + '</span>';
+  }
+  function spQuoteBillingBadge(billingStatus){
+    var cls = {'Not invoiced':'badge-draft', Invoiced:'badge-invoiced', Paid:'badge-paid'}[billingStatus] || 'badge-draft';
+    return '<span class="badge ' + cls + '">' + esc(billingStatus) + '</span>';
+  }
+  // Combined status cell for list/table views — production badge, plus a billing badge
+  // alongside it once the order's actually been invoiced (keeping "Not invoiced" out of
+  // dense tables since it's the default, uninteresting state).
+  function spQuoteStatusCell(q){
+    var billing = quoteBillingStatus(q);
+    var html = spQuoteStatusBadge(quoteProdStatus(q));
+    if(billing !== 'Not invoiced') html += ' ' + spQuoteBillingBadge(billing);
+    return html;
   }
   function spQuoteClientLabel(q){
     var c = q.clientSnapshot;
@@ -2562,7 +2838,8 @@
   }
   function filteredSpQuotes(){
     return spQuotes.filter(function(q){
-      if(quoteFilter.status && q.status !== quoteFilter.status) return false;
+      if(quoteFilter.status && quoteProdStatus(q) !== quoteFilter.status) return false;
+      if(quoteFilter.billingStatus && quoteBillingStatus(q) !== quoteFilter.billingStatus) return false;
       if(quoteFilter.clientId && q.clientId !== quoteFilter.clientId) return false;
       if(quoteFilter.printerId && !spQuoteUsesPrinter(q, quoteFilter.printerId)) return false;
       if(quoteFilter.from && q.quoteDate < quoteFilter.from) return false;
@@ -2581,7 +2858,9 @@
     html += '<form id="spquote-filter-form">';
     html += '<div class="field-row">';
     html += '<div class="field"><label>Status</label><select id="qf-status"><option value="">All statuses</option>' +
-      QUOTE_STATUSES.map(function(s){ return '<option value="'+s+'"'+(quoteFilter.status===s?' selected':'')+'>'+s+'</option>'; }).join('') + '</select></div>';
+      QUOTE_PROD_STATUSES.map(function(s){ return '<option value="'+s+'"'+(quoteFilter.status===s?' selected':'')+'>'+s+'</option>'; }).join('') + '</select></div>';
+    html += '<div class="field"><label>Billing</label><select id="qf-billing"><option value="">All billing statuses</option>' +
+      QUOTE_BILLING_STATUSES.map(function(s){ return '<option value="'+s+'"'+(quoteFilter.billingStatus===s?' selected':'')+'>'+s+'</option>'; }).join('') + '</select></div>';
     html += '<div class="field"><label>Customer</label><select id="qf-client"><option value="">All customers</option>' +
       clients.map(function(c){ return '<option value="'+c.id+'"'+(quoteFilter.clientId===c.id?' selected':'')+'>'+esc(c.name)+'</option>'; }).join('') + '</select></div>';
     html += '<div class="field"><label>Printer</label><select id="qf-printer"><option value="">All printers</option>' +
@@ -2620,7 +2899,7 @@
           '<td class="num-cell">'+fmtMoney(q.totalCost)+'</td>' +
           '<td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td>' +
           '<td class="num-cell">'+fmtMoney(q.profit)+'</td>' +
-          '<td>'+spQuoteStatusBadge(q.status)+'</td>' +
+          '<td>'+spQuoteStatusCell(q)+'</td>' +
           '</tr>';
       });
       html += '</tbody></table></div>';
@@ -2634,11 +2913,11 @@
       if(!el) return;
       el.addEventListener('change', function(){ quoteFilter[key] = parse ? parse(this.value) : this.value; render(); });
     };
-    bind('qf-status','status'); bind('qf-client','clientId'); bind('qf-printer','printerId');
+    bind('qf-status','status'); bind('qf-billing','billingStatus'); bind('qf-client','clientId'); bind('qf-printer','printerId');
     bind('qf-from','from'); bind('qf-to','to'); bind('qf-min-profit','minProfit'); bind('qf-max-profit','maxProfit');
     var clearBtn = document.getElementById('qf-clear-btn');
     if(clearBtn) clearBtn.addEventListener('click', function(){
-      quoteFilter = { status:'', clientId:'', printerId:'', minProfit:'', maxProfit:'', from:'', to:'' };
+      quoteFilter = { status:'', billingStatus:'', clientId:'', printerId:'', minProfit:'', maxProfit:'', from:'', to:'' };
       render();
     });
   }
@@ -2661,9 +2940,16 @@
       html += '<button class="btn btn-ghost btn-danger" data-ask-delete-quote="'+q.id+'">Delete</button>';
     }
     html += '</div>';
-    html += '<div class="status-actions">' + QUOTE_STATUSES.map(function(s){
-      var active = q.status === s;
-      return '<button class="btn btn-sm'+(active?' btn-primary':'')+'" data-set-quote-status="'+s+'" data-quote-id="'+q.id+'"'+(active?' disabled':'')+'>'+s+'</button>';
+    var curProd = quoteProdStatus(q), curBilling = quoteBillingStatus(q);
+    html += '<div class="hint" style="margin-bottom:4px;">Production status</div>';
+    html += '<div class="status-actions">' + QUOTE_PROD_STATUSES.map(function(s){
+      var active = curProd === s;
+      return '<button class="btn btn-sm'+(active?' btn-primary':'')+'" data-set-quote-prod-status="'+s+'" data-quote-id="'+q.id+'"'+(active?' disabled':'')+'>'+s+'</button>';
+    }).join('') + '</div>';
+    html += '<div class="hint" style="margin:10px 0 4px;">Billing status <span style="font-weight:400;">— tracked separately, e.g. a deposit can be invoiced while still printing</span></div>';
+    html += '<div class="status-actions">' + QUOTE_BILLING_STATUSES.map(function(s){
+      var active = curBilling === s;
+      return '<button class="btn btn-sm'+(active?' btn-primary':'')+'" data-set-quote-billing-status="'+s+'" data-quote-id="'+q.id+'"'+(active?' disabled':'')+'>'+s+'</button>';
     }).join('') + '</div>';
     html += '</div>';
 
@@ -2674,14 +2960,14 @@
     html += '<div class="field"><label>Start date</label><input type="date" id="quote-start-date" value="'+esc(q.startDate||'')+'"></div>';
     html += '<div class="field"><label>Estimated finish <span style="font-weight:400; color:var(--ink-faint);">— continuous printing</span></label><input type="text" value="'+esc(finishDate ? fmtDate(finishDate) : (q.startDate ? '—' : 'Set a start date')) +'" readonly></div>';
     html += '</div>';
-    if(q.status==='Accepted' || q.status==='Printing'){
+    if(curProd==='Accepted' || curProd==='Printing'){
       html += '<p class="hint">Track completed units on the <a href="javascript:void(0)" data-nav="worksheet">Work Sheet</a>.</p>';
     }
     html += '</div>';
 
     if(q.convertedToInvoiceNumber) html += '<div class="banner no-print">This quote was invoiced as <strong>&nbsp;'+esc(q.convertedToInvoiceNumber)+'</strong>.</div>';
 
-    var sm = statusMeta(q.status==='Cancelled' ? 'red' : (q.profitMargin >= (spSettings.minimumMarginPct||0) ? 'green' : (q.profitMargin > 0 ? 'yellow' : 'red')));
+    var sm = statusMeta(curProd==='Cancelled' ? 'red' : (q.profitMargin >= (spSettings.minimumMarginPct||0) ? 'green' : (q.profitMargin > 0 ? 'yellow' : 'red')));
     html += '<div class="grid grid-4" style="margin-bottom:18px;">' +
       statCard('Total cost', fmtMoney(q.totalCost), '') +
       statCard('Selling price', fmtMoney(q.sellingPriceTotal), 'accent') +
@@ -2754,6 +3040,16 @@
       });
       html += '</tbody></table></div>';
       html += '<p class="hint" style="margin-top:10px;">'+q.totalPrintHours.toFixed(2)+' total print hours across '+q.legs.length+' printers (turnaround ≈ '+(Number(q.turnaroundHours)||0).toFixed(2)+' h since they run in parallel) · '+q.plates+' plates total · Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
+    } else if(q.isMultiPart && q.parts && q.parts.length){
+      html += '<h4 style="font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:18px 0 10px;">Made from '+q.parts.length+' parts</h4>';
+      html += '<div class="table-wrap"><table><thead><tr><th>Part</th><th class="num-cell">Qty / unit</th><th class="num-cell">Plates</th><th class="num-cell">Hours</th><th class="num-cell">Filament</th><th class="num-cell">Electricity</th><th class="num-cell">Machine</th></tr></thead><tbody>';
+      q.parts.forEach(function(p){
+        html += '<tr><td>'+esc(p.name||'—')+'</td><td class="num-cell">'+p.qtyPerUnit+'</td><td class="num-cell">'+p.plates+'</td>' +
+          '<td class="num-cell">'+p.totalPrintHours.toFixed(2)+'</td><td class="num-cell">'+fmtMoney(p.filamentCost)+'</td>' +
+          '<td class="num-cell">'+fmtMoney(p.electricityCost)+'</td><td class="num-cell">'+fmtMoney(p.machineCost)+'</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      html += '<p class="hint" style="margin-top:10px;">Printer: '+esc(q.printerSnapshot ? q.printerSnapshot.name : '—')+' · '+q.totalPrintHours.toFixed(2)+' total print hours across '+q.parts.length+' parts (printed one after another) · '+q.plates+' plates total · Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
     } else {
       html += '<p class="hint" style="margin-top:10px;">Printer: '+esc(q.printerSnapshot ? q.printerSnapshot.name : '—')+' · '+q.totalPrintHours.toFixed(2)+' print hours · '+(q.plates>1?(q.plates+' plates · '):'')+'Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
     }
@@ -2772,9 +3068,12 @@
   // Orders on the floor: Accepted/Printing by default, plus Completed/Invoiced/Paid when
   // the "also show" toggle is on (handy to double-check a finished order's tally).
   function worksheetOrders(){
-    var statuses = worksheetShowAll ? ['Accepted','Printing','Completed','Invoiced','Paid'] : ['Accepted','Printing'];
-    return spQuotes.filter(function(q){ return statuses.indexOf(q.status) !== -1; })
-      .sort(function(a,b){ return (a.startDate||a.quoteDate||'') < (b.startDate||b.quoteDate||'') ? -1 : 1; });
+    return spQuotes.filter(function(q){
+      var prod = quoteProdStatus(q);
+      if(prod === 'Accepted' || prod === 'Printing') return true;
+      if(worksheetShowAll && (prod === 'Completed' || quoteBillingStatus(q) !== 'Not invoiced')) return true;
+      return false;
+    }).sort(function(a,b){ return (a.startDate||a.quoteDate||'') < (b.startDate||b.quoteDate||'') ? -1 : 1; });
   }
   function worksheetOrderCompleted(q){
     if(q.isSplit) return (q.legsCompleted||[]).reduce(function(s,n){ return s + (Number(n)||0); }, 0);
@@ -2782,7 +3081,7 @@
   }
   function renderWorkSheet(){
     var orders = worksheetOrders();
-    var html = '<div class="view-head"><div><h1>Work Sheet</h1><div class="view-sub">Check off how many units of each order are done — the Dashboard and quote view stay in sync automatically.</div></div>' +
+    var html = '<div class="view-head"><div><h1>Work Sheet</h1><div class="view-sub">Check off how many units of each order are done — the Dashboard, quote view and your Materials stock all stay in sync automatically.</div></div>' +
       '<div class="actions-row"><label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-soft); cursor:pointer;"><input type="checkbox" id="worksheet-show-all"'+(worksheetShowAll?' checked':'')+'> Also show completed/invoiced orders</label></div></div>';
 
     if(!orders.length){
@@ -2798,7 +3097,7 @@
       var completed = Math.min(totalQty, worksheetOrderCompleted(q));
       var pct = totalQty > 0 ? Math.min(100, Math.round((completed/totalQty)*100)) : 0;
       var isDone = totalQty > 0 && completed >= totalQty;
-      var canMarkCompleted = isDone && ['Accepted','Printing'].indexOf(q.status) !== -1;
+      var canMarkCompleted = isDone && ['Accepted','Printing'].indexOf(quoteProdStatus(q)) !== -1;
 
       html += '<div class="card card-pad">';
       html += '<div class="view-head" style="margin-bottom:12px;">';
@@ -2809,7 +3108,7 @@
         html += '<div class="hint">🧵 '+fmtGrams(q.totalFilamentCostedG)+' — '+wsBreakdown.map(function(e){ return esc(e.colour)+' '+fmtGrams(e.grams); }).join(', ')+'</div>';
       }
       html += '</div>';
-      html += '<div>'+spQuoteStatusBadge(q.status)+'</div>';
+      html += '<div>'+spQuoteStatusCell(q)+'</div>';
       html += '</div>';
 
       html += '<div style="display:flex; align-items:center; gap:10px; margin-bottom:'+(q.isSplit?'14px':'2px')+';">';
@@ -2843,6 +3142,23 @@
     html += '</div>';
     return html;
   }
+  // Deducts (or, for a negative delta, restocks) filament from Materials stock the moment
+  // units are checked off complete on the Work Sheet. Spreads the quote's frozen filament
+  // recipe (costedGrams — already includes waste + failure allowance) evenly per unit across
+  // its full order quantity, same "practical answer" convention as the Filament needed card.
+  // Materials that were deleted since the quote was saved are skipped rather than erroring.
+  function applyFilamentStockDelta(q, deltaUnits){
+    if(!dbNS || !deltaUnits) return;
+    var qty = Number(q.quantity)||0;
+    if(qty <= 0) return;
+    (q.filamentLines||[]).forEach(function(line){
+      var mat = materials.find(function(m){ return m.id === line.materialId; });
+      if(!mat) return;
+      var gramsPerUnit = (Number(line.costedGrams)||0) / qty;
+      var newStock = (Number(mat.stockG)||0) - (gramsPerUnit * deltaUnits);
+      dbNS.doc('materials/' + mat.id).update({ stockG: newStock });
+    });
+  }
   function wireWorkSheetEvents(){
     document.querySelectorAll('#view input[data-order-completed]').forEach(function(el){
       el.addEventListener('change', function(){
@@ -2852,7 +3168,9 @@
         var cap = Math.max(0, Number(q.quantity)||0);
         var val = Math.max(0, Math.min(cap, Math.round(Number(this.value)||0)));
         this.value = val;
+        var prevCompleted = Number(q.completedQuantity)||0;
         dbNS.doc('spQuotes/' + id).update({ completedQuantity: val, updatedAt: new Date().toISOString() });
+        applyFilamentStockDelta(q, val - prevCompleted);
       });
     });
     document.querySelectorAll('#view input[data-leg-idx]').forEach(function(el){
@@ -2865,19 +3183,21 @@
         var cap = Math.max(0, Number(leg ? leg.quantity : 0)||0);
         var val = Math.max(0, Math.min(cap, Math.round(Number(this.value)||0)));
         this.value = val;
+        var prevLegVal = Number((q.legsCompleted||[])[legIdx])||0;
         var legsCompleted = (q.legsCompleted||[]).slice();
         while(legsCompleted.length < (q.legs||[]).length) legsCompleted.push(0);
         legsCompleted[legIdx] = val;
         dbNS.doc('spQuotes/' + id).update({ legsCompleted: legsCompleted, updatedAt: new Date().toISOString() });
+        applyFilamentStockDelta(q, val - prevLegVal);
       });
     });
   }
 
   /* ---------------- Solid Prints — Invoices ----------------
      Invoices are shared `documents`, but only the ones created via "Create invoice from
-     this" / setting a quote's status to Invoiced (tagged with fromQuote) belong to Solid
-     Prints — general Charl Engelbrecht invoices stay out of this list. Reuses the existing
-     document viewer (renderDocView) rather than building a second one. */
+     this" / setting a quote's billing status to Invoiced (tagged with fromQuote) belong to
+     Solid Prints — general Charl Engelbrecht invoices stay out of this list. Reuses the
+     existing document viewer (renderDocView) rather than building a second one. */
   function spInvoices(){
     return docs.filter(function(d){ return d.kind==='invoice' && !!d.fromSpQuote; })
       .sort(function(a,b){ return (b.dateIssued||'') < (a.dateIssued||'') ? -1 : 1; });
@@ -2887,7 +3207,7 @@
     var html = '<div class="view-head"><div><h1>Invoices</h1><div class="view-sub">Invoices created from Solid Prints quotes</div></div></div>';
     html += '<div class="card">';
     if(!list.length){
-      html += emptyState('📄', 'No invoices yet', 'Set an accepted quote\'s status to Invoiced — or use "Create invoice from this" in the Calculator — to see it here.', [
+      html += emptyState('📄', 'No invoices yet', 'Set a quote\'s billing status to Invoiced — or use "Create invoice from this" in the Calculator — to see it here.', [
         {label:'View quotes', nav:'spquotes', primary:true}
       ]);
     } else {
@@ -3994,8 +4314,11 @@
     var confirmDelReport = e.target.closest('[data-confirm-delete-report]');
     if(confirmDelReport){ deleteReport(confirmDelReport.getAttribute('data-confirm-delete-report')); return; }
 
-    var setQuoteStatusBtn = e.target.closest('[data-set-quote-status]');
-    if(setQuoteStatusBtn){ setSpQuoteStatus(setQuoteStatusBtn.getAttribute('data-quote-id'), setQuoteStatusBtn.getAttribute('data-set-quote-status')); return; }
+    var setQuoteProdStatusBtn = e.target.closest('[data-set-quote-prod-status]');
+    if(setQuoteProdStatusBtn){ setSpQuoteProdStatus(setQuoteProdStatusBtn.getAttribute('data-quote-id'), setQuoteProdStatusBtn.getAttribute('data-set-quote-prod-status')); return; }
+
+    var setQuoteBillingStatusBtn = e.target.closest('[data-set-quote-billing-status]');
+    if(setQuoteBillingStatusBtn){ setSpQuoteBillingStatus(setQuoteBillingStatusBtn.getAttribute('data-quote-id'), setQuoteBillingStatusBtn.getAttribute('data-set-quote-billing-status')); return; }
 
     var editQuoteBtn = e.target.closest('[data-edit-quote]');
     if(editQuoteBtn){ var eq = spQuotes.find(function(x){return x.id===editQuoteBtn.getAttribute('data-edit-quote');}); if(eq) editQuoteInCalculator(eq); return; }
@@ -4015,7 +4338,7 @@
     if(worksheetShowAllToggle){ worksheetShowAll = worksheetShowAllToggle.checked; render(); return; }
 
     var markCompletedBtn = e.target.closest('[data-worksheet-mark-completed]');
-    if(markCompletedBtn){ setSpQuoteStatus(markCompletedBtn.getAttribute('data-worksheet-mark-completed'), 'Completed'); return; }
+    if(markCompletedBtn){ setSpQuoteProdStatus(markCompletedBtn.getAttribute('data-worksheet-mark-completed'), 'Completed'); return; }
   });
 
   document.addEventListener('submit', function(e){
