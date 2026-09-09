@@ -2107,13 +2107,19 @@
       if(!activePrinters.length){
         html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
       }
-      html += '<div class="table-wrap"><table><thead><tr><th>Part name</th><th>Printer</th><th>Qty / unit</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Plates</th><th>Hours</th><th></th></tr></thead><tbody id="calc-parts-body">';
+      html += '<div class="table-wrap"><table><thead><tr><th>Part name</th><th>Printer</th><th>Qty / unit</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Plates</th><th>Hours</th><th>Filament</th><th></th></tr></thead><tbody id="calc-parts-body">';
       (calc.parts && calc.parts.length ? calc.parts : (calc.parts = [blankPart()])).forEach(function(part, i){
         var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
         var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
         var qtyNeeded = Math.max(0, Number(calc.quantity)||0) * qtyPerUnit;
         var plates = qtyNeeded > 0 ? Math.ceil(qtyNeeded / unitsPerPlate) : 0;
         var hours = plates * (Number(part.printTimePerPlate)||0);
+        // Live filament cost for THIS part alone, straight from the same calcResult() used to
+        // save the quote — lets you catch a "total" typed into a "per plate" field immediately
+        // (it'll jump far higher than expected the moment plates > 1) instead of only noticing
+        // after saving.
+        var partResult = (r.parts || [])[i];
+        var partFilCost = partResult ? partResult.filamentCost : 0;
         html += '<tr data-idx="'+i+'">' +
           '<td><input class="calc-part-name" type="text" style="min-width:120px;" placeholder="e.g. Lid" value="'+esc(part.name)+'"></td>' +
           '<td><select class="calc-part-printer" style="min-width:110px;">' + (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(part.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') + '</select></td>' +
@@ -2123,6 +2129,7 @@
           '<td><input class="calc-part-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(part.wasteGrams)+'"></td>' +
           '<td class="num-cell mono" data-part-plates>'+plates+'</td>' +
           '<td class="num-cell mono" data-part-hours>'+hours.toFixed(2)+'</td>' +
+          '<td class="num-cell mono" data-part-filcost>'+fmtMoney(partFilCost)+'</td>' +
           '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-part data-idx="'+i+'">✕</button></td>' +
           '</tr>';
       });
@@ -2197,7 +2204,7 @@
     /* ---- filament ---- */
     html += '<div class="card card-pad" style="margin-bottom:18px;">';
     html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Filament / materials</h3>';
-    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per plate, entered separately for each printer — straight off your slicer for that machine — since the same part can use a different amount (or none) of a material depending on where it prints. Waste differs per printer too, set above.' : (calc.calcType==='parts' ? 'Grams per plate, entered separately for each part — since a lid and a base can use a different amount (or colour) of filament. Waste differs per part too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.'))) + ' Prices come from your Materials database.</p>';
+    html += '<p class="hint" style="margin-bottom:12px;">' + (calc.splitEnabled ? 'Grams per plate, entered separately for each printer — straight off your slicer for that machine — since the same part can use a different amount (or none) of a material depending on where it prints. This gets multiplied automatically by that printer\'s own plate count — enter what ONE plate uses, not the total for that printer. Waste differs per printer too, set above.' : (calc.calcType==='parts' ? 'Grams per plate, entered separately for each part — since a lid and a base can use a different amount (or colour) of filament. This gets multiplied automatically by that part\'s own plate count (shown in the Parts table above) — enter what ONE plate uses, not the total for that part. Check the Filament column in the Parts table above as you type — it shows each part\'s real cost so you can catch a total entered by mistake. Waste differs per part too, set above.' : (calc.calcType==='plate' ? 'Grams per plate — multiplied by the number of plates automatically.' : 'Grams for the whole job.'))) + ' Prices come from your Materials database.</p>';
     if(!activeMaterials.length){
       html += '<p class="hint">No active materials yet — add one on the Materials tab.</p>';
     } else if(calc.splitEnabled){
@@ -2448,11 +2455,16 @@
       if(finishCell) finishCell.textContent = legFinishHours.toFixed(2);
     });
   }
-  function refreshPartsRows(){
+  function refreshPartsRows(r){
     // Same idea as refreshSplitRows() above, but for the parts/components table — updates
-    // each part's auto-computed plates/hours cells in place after a field edit.
+    // each part's auto-computed plates/hours/filament-cost cells in place after a field edit.
+    // Filament cost comes straight from the same calcResult() used to save the quote (not
+    // re-derived here) so the live number always matches what actually gets saved — and so a
+    // "total" typed into a "per plate" field shows its inflated cost immediately, right next
+    // to the part, instead of only surfacing after the quote is saved.
     var body = document.getElementById('calc-parts-body');
     if(!body || !calc.parts) return;
+    if(!r) r = calcResult();
     calc.parts.forEach(function(part, i){
       var tr = body.querySelector('tr[data-idx="'+i+'"]');
       if(!tr) return;
@@ -2465,6 +2477,11 @@
       if(platesCell) platesCell.textContent = String(plates);
       var hoursCell = tr.querySelector('[data-part-hours]');
       if(hoursCell) hoursCell.textContent = hours.toFixed(2);
+      var filCostCell = tr.querySelector('[data-part-filcost]');
+      if(filCostCell){
+        var partResult = (r.parts || [])[i];
+        filCostCell.textContent = fmtMoney(partResult ? partResult.filamentCost : 0);
+      }
     });
   }
   function updateCalcOutputs(){
@@ -2477,7 +2494,7 @@
     set('calc-parts-out-plates', String(r.plates));
     set('calc-parts-out-hours', r.totalPrintHours.toFixed(2));
     set('calc-parts-out-turnaround', (r.turnaroundHours||0).toFixed(2));
-    refreshPartsRows();
+    refreshPartsRows(r);
     set('calc-split-out-plates', String(r.plates));
     set('calc-split-out-hours', r.totalPrintHours.toFixed(2));
     set('calc-split-out-turnaround', (r.turnaroundHours||0).toFixed(2));
