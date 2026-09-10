@@ -5,67 +5,79 @@
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Sans+3:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --paper:#F6F7F4;
+    --paper:#F5F6F8;
     --paper-raised:#FFFFFF;
-    --ink:#1B211D;
-    --ink-soft:#5C6760;
-    --ink-faint:#8B948D;
-    --line:#DEE3DC;
-    --line-strong:#C3CBC3;
-    --accent:#1F5C4A;
-    --accent-hover:#17473A;
-    --accent-soft:#E3EEE8;
-    --accent-ink:#0E332A;
-    --warn:#A85326;
-    --warn-soft:#F5E7DD;
-    --good:#2E7D4F;
-    --good-soft:#E1F0E6;
-    --pending:#8E6B18;
-    --pending-soft:#F6EEDC;
-    --shadow: 0 1px 2px rgba(27,33,29,0.06), 0 6px 16px -8px rgba(27,33,29,0.18);
+    --paper-sunken:#EEF0F3;
+    --ink:#171A1F;
+    --ink-soft:#5B6270;
+    --ink-faint:#8B93A1;
+    --line:#E4E7EC;
+    --line-strong:#CBD1DB;
+    --accent:#1B6E5C;
+    --accent-hover:#155A4A;
+    --accent-soft:#E4F2EC;
+    --accent-ink:#0D3B30;
+    --warn:#B4491F;
+    --warn-soft:#FBEAE1;
+    --good:#1F8850;
+    --good-soft:#E4F5EA;
+    --pending:#95690B;
+    --pending-soft:#FAF0DA;
+    --radius-sm:8px;
+    --radius-md:12px;
+    --radius-lg:18px;
+    --shadow-sm: 0 1px 2px rgba(23,26,31,0.05);
+    --shadow: 0 1px 2px rgba(23,26,31,0.04), 0 8px 24px -10px rgba(23,26,31,0.14);
+    --shadow-lg: 0 4px 10px rgba(23,26,31,0.06), 0 16px 40px -14px rgba(23,26,31,0.22);
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark){
     :root:not([data-theme="light"]){
-      --paper:#131C17;
-      --paper-raised:#1A2620;
-      --ink:#EAF0EA;
-      --ink-soft:#A9B7AE;
-      --ink-faint:#71827A;
-      --line:#293A31;
-      --line-strong:#3A4E43;
-      --accent:#54B58C;
-      --accent-hover:#6BC79E;
-      --accent-soft:#1E3A2E;
-      --accent-ink:#BFE9D3;
-      --warn:#E08A55;
-      --warn-soft:#3B2A1E;
-      --good:#6FC492;
-      --good-soft:#1E3A2A;
-      --pending:#E0B15A;
-      --pending-soft:#3A2F17;
-      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 20px -8px rgba(0,0,0,0.5);
+      --paper:#12161A;
+      --paper-raised:#1B2127;
+      --paper-sunken:#0D1013;
+      --ink:#EEF1F4;
+      --ink-soft:#A6AEBB;
+      --ink-faint:#6E7684;
+      --line:#262D35;
+      --line-strong:#38414C;
+      --accent:#4FBB98;
+      --accent-hover:#68C9A9;
+      --accent-soft:#1B3730;
+      --accent-ink:#BEE8D7;
+      --warn:#E4935F;
+      --warn-soft:#3A2A1F;
+      --good:#63C68C;
+      --good-soft:#1B3629;
+      --pending:#E3B65E;
+      --pending-soft:#3A2E17;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.35);
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 28px -10px rgba(0,0,0,0.55);
+      --shadow-lg: 0 4px 10px rgba(0,0,0,0.35), 0 20px 48px -16px rgba(0,0,0,0.6);
     }
   }
   :root[data-theme="dark"]{
-    --paper:#131C17;
-    --paper-raised:#1A2620;
-    --ink:#EAF0EA;
-    --ink-soft:#A9B7AE;
-    --ink-faint:#71827A;
-    --line:#293A31;
-    --line-strong:#3A4E43;
-    --accent:#54B58C;
-    --accent-hover:#6BC79E;
-    --accent-soft:#1E3A2E;
-    --accent-ink:#BFE9D3;
-    --warn:#E08A55;
-    --warn-soft:#3B2A1E;
-    --good:#6FC492;
-    --good-soft:#1E3A2A;
-    --pending:#E0B15A;
-    --pending-soft:#3A2F17;
-    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 20px -8px rgba(0,0,0,0.5);
+    --paper:#12161A;
+    --paper-raised:#1B2127;
+    --paper-sunken:#0D1013;
+    --ink:#EEF1F4;
+    --ink-soft:#A6AEBB;
+    --ink-faint:#6E7684;
+    --line:#262D35;
+    --line-strong:#38414C;
+    --accent:#4FBB98;
+    --accent-hover:#68C9A9;
+    --accent-soft:#1B3730;
+    --accent-ink:#BEE8D7;
+    --warn:#E4935F;
+    --warn-soft:#3A2A1F;
+    --good:#63C68C;
+    --good-soft:#1B3629;
+    --pending:#E3B65E;
+    --pending-soft:#3A2E17;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.35);
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 10px 28px -10px rgba(0,0,0,0.55);
+    --shadow-lg: 0 4px 10px rgba(0,0,0,0.35), 0 20px 48px -16px rgba(0,0,0,0.6);
   }
 
   *{box-sizing:border-box;}
@@ -75,7 +87,7 @@
     color:var(--ink);
     font-family:'Source Sans 3', ui-sans-serif, system-ui, sans-serif;
     font-size:15px;
-    line-height:1.5;
+    line-height:1.55;
     -webkit-font-smoothing:antialiased;
   }
   h1,h2,h3,h4{
@@ -84,7 +96,7 @@
     text-wrap:balance;
     margin:0;
     color:var(--ink);
-    letter-spacing:-0.01em;
+    letter-spacing:-0.015em;
   }
   .mono{ font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace; font-variant-numeric:tabular-nums; }
   a{color:var(--accent);}
@@ -95,42 +107,46 @@
     color:var(--ink);
     background:var(--paper-raised);
     border:1px solid var(--line-strong);
-    border-radius:6px;
-    padding:8px 10px;
+    border-radius:var(--radius-sm);
+    padding:9px 11px;
     width:100%;
+    transition:border-color .12s ease, box-shadow .12s ease;
   }
+  input:hover, select:hover, textarea:hover{ border-color:var(--ink-faint); }
   input:focus, select:focus, textarea:focus, button:focus-visible{
-    outline:2px solid var(--accent);
-    outline-offset:1px;
+    outline:none;
+    border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-soft);
   }
-  label{ display:block; font-size:12.5px; font-weight:600; color:var(--ink-soft); margin-bottom:4px; letter-spacing:0.01em; }
+  label{ display:block; font-size:12.5px; font-weight:600; color:var(--ink-soft); margin-bottom:5px; letter-spacing:0.01em; }
   textarea{ resize:vertical; min-height:70px; }
 
   .btn{
     display:inline-flex; align-items:center; gap:6px;
     font-size:14px; font-weight:600;
-    padding:9px 15px; border-radius:7px;
+    padding:9px 16px; border-radius:var(--radius-sm);
     border:1px solid var(--line-strong);
     background:var(--paper-raised); color:var(--ink);
     cursor:pointer;
-    transition:background .12s ease, border-color .12s ease, transform .04s ease;
+    box-shadow:var(--shadow-sm);
+    transition:background .12s ease, border-color .12s ease, transform .06s ease, box-shadow .12s ease;
     white-space:nowrap;
   }
-  .btn:hover{ border-color:var(--ink-faint); }
-  .btn:active{ transform:translateY(1px); }
+  .btn:hover{ border-color:var(--ink-faint); transform:translateY(-1px); box-shadow:var(--shadow); }
+  .btn:active{ transform:translateY(0); box-shadow:var(--shadow-sm); }
   .btn-primary{ background:var(--accent); border-color:var(--accent); color:#fff; }
   .btn-primary:hover{ background:var(--accent-hover); border-color:var(--accent-hover); }
-  .btn-ghost{ background:transparent; border-color:transparent; }
-  .btn-ghost:hover{ background:var(--accent-soft); border-color:transparent; }
+  .btn-ghost{ background:transparent; border-color:transparent; box-shadow:none; }
+  .btn-ghost:hover{ background:var(--accent-soft); border-color:transparent; box-shadow:none; }
   .btn-danger{ color:var(--warn); }
   .btn-danger:hover{ background:var(--warn-soft); border-color:var(--warn-soft); }
-  .btn-sm{ padding:6px 11px; font-size:13px; border-radius:6px; }
-  .btn[disabled]{ opacity:.45; cursor:not-allowed; }
+  .btn-sm{ padding:7px 12px; font-size:13px; border-radius:var(--radius-sm); }
+  .btn[disabled]{ opacity:.45; cursor:not-allowed; transform:none !important; box-shadow:none !important; }
 
   .badge{
     display:inline-flex; align-items:center; gap:5px;
-    font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
-    padding:3px 9px; border-radius:100px;
+    font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em;
+    padding:4px 10px; border-radius:100px;
     background:var(--line); color:var(--ink-soft);
   }
   .badge-draft{ background:var(--line); color:var(--ink-soft); }
@@ -148,73 +164,75 @@
 
   #topbar{
     position:sticky; top:0; z-index:20;
-    background:var(--paper-raised);
+    background:color-mix(in srgb, var(--paper-raised) 92%, transparent);
+    -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
     border-bottom:1px solid var(--line);
   }
   .topbar-inner{
-    max-width:1080px; margin:0 auto;
+    max-width:1120px; margin:0 auto;
     display:flex; align-items:center; gap:22px;
-    padding:14px 20px;
+    padding:14px 24px;
   }
   .brand{ display:flex; align-items:baseline; gap:8px; flex:0 0 auto; }
-  .brand-mark{ font-family:'Archivo'; font-weight:700; font-size:17px; letter-spacing:-0.01em; }
+  .brand-mark{ font-family:'Archivo'; font-weight:700; font-size:17px; letter-spacing:-0.02em; }
   .brand-sub{ font-size:11.5px; color:var(--ink-faint); font-family:'IBM Plex Mono'; }
   nav.tabs{ display:flex; gap:2px; flex-wrap:wrap; }
   .tab{
     font-size:13.5px; font-weight:600; color:var(--ink-soft);
-    padding:8px 12px; border-radius:7px; cursor:pointer; border:1px solid transparent;
+    padding:8px 13px; border-radius:100px; cursor:pointer; border:1px solid transparent;
     background:transparent;
+    transition:background .12s ease, color .12s ease;
   }
-  .tab:hover{ background:var(--accent-soft); color:var(--ink); }
-  .tab.active{ background:var(--accent-soft); color:var(--accent-ink); }
+  .tab:hover{ background:var(--paper-sunken); color:var(--ink); }
+  .tab.active{ background:var(--accent); color:#fff; }
   .topbar-spacer{ flex:1; }
 
-  main{ max-width:1080px; margin:0 auto; padding:28px 20px 80px; }
-  .view-head{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
-  .view-head h1{ font-size:24px; }
-  .view-sub{ color:var(--ink-soft); font-size:13.5px; margin-top:4px; }
+  main{ max-width:1120px; margin:0 auto; padding:32px 24px 88px; }
+  .view-head{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:24px; flex-wrap:wrap; }
+  .view-head h1{ font-size:26px; }
+  .view-sub{ color:var(--ink-soft); font-size:13.5px; margin-top:5px; }
   .actions-row{ display:flex; gap:8px; flex-wrap:wrap; }
 
   .card{
     background:var(--paper-raised);
     border:1px solid var(--line);
-    border-radius:12px;
+    border-radius:var(--radius-lg);
     box-shadow:var(--shadow);
   }
-  .card-pad{ padding:20px; }
+  .card-pad{ padding:24px; }
   .grid{ display:grid; gap:16px; }
   .grid-2{ grid-template-columns:1fr 1fr; }
   .grid-3{ grid-template-columns:repeat(3,1fr); }
   .grid-4{ grid-template-columns:repeat(4,1fr); }
   @media (max-width:720px){ .grid-2,.grid-3,.grid-4{ grid-template-columns:1fr; } }
-  .workspace-card{ text-align:left; cursor:pointer; font-family:inherit; width:100%; transition:border-color .15s, transform .15s; }
-  .workspace-card:hover{ border-color:var(--accent); transform:translateY(-1px); }
+  .workspace-card{ text-align:left; cursor:pointer; font-family:inherit; width:100%; transition:border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
+  .workspace-card:hover{ border-color:var(--accent); transform:translateY(-2px); box-shadow:var(--shadow-lg); }
 
-  .stat{ padding:16px 18px; }
+  .stat{ padding:18px 20px; }
   .stat-label{ font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--ink-faint); }
-  .stat-value{ font-family:'IBM Plex Mono'; font-size:24px; font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .stat-value{ font-family:'IBM Plex Mono'; font-size:25px; font-weight:600; margin-top:7px; font-variant-numeric:tabular-nums; letter-spacing:-0.01em; }
   .stat-value.accent{ color:var(--accent); }
   .stat-value.warn{ color:var(--warn); }
 
   table{ width:100%; border-collapse:collapse; font-size:14px; }
-  th{ text-align:left; font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--ink-faint); padding:0 12px 10px; border-bottom:1px solid var(--line); }
-  td{ padding:12px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  th{ text-align:left; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--ink-faint); padding:0 14px 11px; border-bottom:1px solid var(--line); }
+  td{ padding:13px 14px; border-bottom:1px solid var(--line); vertical-align:middle; }
   tbody tr:last-child td{ border-bottom:none; }
-  tbody tr:hover{ background:var(--accent-soft); }
-  .table-wrap{ overflow-x:auto; }
+  tbody tr:hover{ background:var(--paper-sunken); }
+  .table-wrap{ overflow-x:auto; border-radius:var(--radius-md); }
   .num-cell{ font-family:'IBM Plex Mono'; font-variant-numeric:tabular-nums; text-align:right; }
   .row-link{ cursor:pointer; }
 
-  .empty{ text-align:center; padding:56px 24px; color:var(--ink-soft); }
+  .empty{ text-align:center; padding:60px 24px; color:var(--ink-soft); }
   .empty h3{ font-size:16px; margin-bottom:6px; color:var(--ink); }
   .empty p{ font-size:13.5px; max-width:38ch; margin:0 auto 18px; }
   .empty-icon{ font-size:30px; margin-bottom:10px; opacity:.7; }
 
-  .field{ margin-bottom:14px; }
+  .field{ margin-bottom:15px; }
   .field-row{ display:flex; gap:12px; }
   .field-row > .field{ flex:1; }
   .hint{ font-size:12px; color:var(--ink-faint); margin-top:4px; }
-  .switch-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; background:var(--accent-soft); border-radius:8px; }
+  .switch-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; background:var(--accent-soft); border-radius:var(--radius-sm); }
   .switch{ position:relative; width:38px; height:22px; flex:0 0 auto; }
   .switch input{ position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; }
   .switch .track{ position:absolute; inset:0; background:var(--line-strong); border-radius:100px; transition:background .15s; }
@@ -222,24 +240,24 @@
   .switch .thumb{ position:absolute; top:2px; left:2px; width:18px; height:18px; background:#fff; border-radius:50%; transition:left .15s; box-shadow:0 1px 2px rgba(0,0,0,.3); }
   .switch input:checked ~ .thumb{ left:18px; }
 
-  .progress-bar{ position:relative; height:8px; border-radius:100px; background:var(--line-strong); overflow:hidden; }
+  .progress-bar{ position:relative; height:8px; border-radius:100px; background:var(--paper-sunken); overflow:hidden; }
   .progress-bar .fill{ position:absolute; inset:0 auto 0 0; height:100%; border-radius:100px; background:var(--accent); transition:width .15s; }
   .progress-bar .fill.complete{ background:var(--good); }
   .worksheet-count{ width:64px; text-align:center; }
 
-  .items-table th, .items-table td{ padding:8px 8px; }
+  .items-table th, .items-table td{ padding:9px 8px; }
   .items-table input{ padding:7px 8px; }
   .items-table .desc-col{ width:50%; }
   .items-table .num-col{ width:120px; }
   .items-table .del-col{ width:36px; }
 
-  .totals{ margin-left:auto; width:280px; display:flex; flex-direction:column; gap:8px; }
+  .totals{ margin-left:auto; width:280px; display:flex; flex-direction:column; gap:9px; }
   .totals-row{ display:flex; justify-content:space-between; font-size:14px; }
-  .totals-row.total{ font-weight:700; font-size:17px; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
+  .totals-row.total{ font-weight:700; font-size:17px; border-top:1px solid var(--line); padding-top:11px; margin-top:3px; }
   .totals-row.total .mono{ color:var(--accent); }
 
-  .modal-backdrop{ position:fixed; inset:0; background:rgba(20,26,22,0.45); display:flex; align-items:center; justify-content:center; z-index:50; padding:20px; }
-  .modal{ background:var(--paper-raised); border-radius:12px; box-shadow:var(--shadow); max-width:460px; width:100%; padding:22px; max-height:88vh; overflow:auto; }
+  .modal-backdrop{ position:fixed; inset:0; background:rgba(15,18,22,0.5); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; z-index:50; padding:20px; }
+  .modal{ background:var(--paper-raised); border-radius:var(--radius-lg); box-shadow:var(--shadow-lg); max-width:460px; width:100%; padding:24px; max-height:88vh; overflow:auto; }
   .modal h2{ font-size:17px; margin-bottom:16px; }
 
   .sheet-wrap{ background:#3d4640; padding:32px 16px; border-radius:12px; }
@@ -282,6 +300,48 @@
   details.card > summary::-webkit-details-marker{ display:none; }
   details.card > summary::before{ content:'▸ '; color:var(--ink-faint); }
   details.card[open] > summary::before{ content:'▾ '; color:var(--ink-faint); }
+
+  /* ---- Calculator: part / printer-leg card layout ----
+     Used for the Parts list (multi-part mode) and both printer-split leg lists (whole-job
+     split and a part's own split) — a stack of self-contained cards instead of one dense,
+     many-column table, so a job with several parts (each maybe split across printers) stays
+     scannable rather than overwhelming. */
+  .part-card{
+    background:var(--paper-raised); border:1px solid var(--line); border-radius:var(--radius-md);
+    padding:16px 18px; margin-bottom:14px; box-shadow:var(--shadow-sm);
+  }
+  .part-card-top{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  .part-card-top .calc-part-name{ font-family:'Archivo'; font-weight:700; font-size:15.5px; flex:1; }
+  .part-card-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(130px,1fr)); gap:12px 14px; align-items:start; }
+  .part-card-grid .field{ margin-bottom:0; }
+  .part-card-grid .field label{ font-size:11px; white-space:nowrap; }
+  .part-split-toggle-field{ display:flex; align-items:center; }
+  .part-split-toggle-field label{ display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-soft); margin:0; cursor:pointer; white-space:nowrap; }
+  .part-card-foot{
+    display:flex; flex-wrap:wrap; gap:16px; margin-top:14px; padding-top:12px;
+    border-top:1px solid var(--line); font-size:12.5px; color:var(--ink-soft);
+  }
+  .part-card-foot b{ font-family:'IBM Plex Mono'; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; margin-left:4px; }
+  .part-card-foot .part-card-remove{ margin-left:auto; }
+
+  .leg-panel{ margin-top:14px; padding:14px 16px; background:var(--paper-sunken); border-radius:var(--radius-sm); border:1px dashed var(--line-strong); }
+  .leg-panel .hint{ margin-top:0; margin-bottom:10px; }
+  .leg-row{
+    background:var(--paper-raised); border:1px solid var(--line); border-radius:var(--radius-sm);
+    padding:12px 14px; margin-bottom:10px;
+  }
+  .leg-row:last-child{ margin-bottom:0; }
+  .leg-row-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(110px,1fr)); gap:10px 12px; }
+  .leg-row-grid .field{ margin-bottom:0; }
+  .leg-row-grid .field label{ font-size:10.5px; white-space:nowrap; }
+  .leg-row-foot{
+    display:flex; flex-wrap:wrap; align-items:center; gap:14px; margin-top:10px; padding-top:10px;
+    border-top:1px solid var(--line); font-size:12px; color:var(--ink-soft);
+  }
+  .leg-row-foot b{ font-family:'IBM Plex Mono'; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; margin-left:4px; }
+  .leg-row-foot .btn{ margin-left:auto; }
+  .leg-actions{ margin-top:4px; display:flex; gap:8px; flex-wrap:wrap; }
+  .fil-total-hint{ font-size:11px; color:var(--ink-faint); margin-top:3px; white-space:nowrap; }
 
   @media print{
     body *{ visibility:hidden; }
@@ -561,6 +621,29 @@
     if(!part || !part.printerSplits || !part.printerSplits.length) return;
     var qtys = computeAutoScheduleQuantities(totalQtyNeeded, part.printerSplits);
     part.printerSplits.forEach(function(leg, i){ leg.quantity = qtys[i] || 0; });
+  }
+  /* How many plates a given filament-matrix COLUMN represents, read from an already-computed
+     calcResult() (r) — used to show a live "× N plates = total g" hint under each per-plate
+     grams field, so it's never ambiguous that a per-plate figure gets multiplied before it's
+     costed (this is exactly the mix-up a "total" entered into a "per plate" field causes).
+     partIdx/legIdx null means "not that kind of column" — job-split columns pass legIdx only,
+     parts-mode columns pass partIdx (and legIdx too, if that part is itself split). */
+  function filColumnPlates(r, partIdx, legIdx){
+    if(partIdx == null){
+      return (r && r.isSplit && r.legs && r.legs[legIdx]) ? r.legs[legIdx].plates : 0;
+    }
+    var pr = r && r.parts ? r.parts[partIdx] : null;
+    if(!pr) return 0;
+    if(legIdx != null) return (pr.isSplit && pr.legs && pr.legs[legIdx]) ? pr.legs[legIdx].plates : 0;
+    return pr.plates || 0;
+  }
+  function filTotalHintId(materialId, partIdx, legIdx){
+    return 'calc-fil-total-'+materialId+'-'+(partIdx==null?'x':partIdx)+'-'+(legIdx==null?'x':legIdx);
+  }
+  function filTotalHintText(gramsPerPlate, plates){
+    var g = Number(gramsPerPlate)||0;
+    if(!g) return '';
+    return '× '+plates+' plate'+(plates===1?'':'s')+' = '+(g*plates).toFixed(1)+' g';
   }
   function printerMachineRate(printer){
     if(!printer) return {depreciationPerHour:0, maintenancePerHour:0, hourlyRate:0};
@@ -2200,14 +2283,16 @@
     html += '</div>';
 
     if(calc.calcType === 'parts' && !calc.splitEnabled){
-      /* ---- parts / components ---- */
+      /* ---- parts / components ----
+         Each part is its own card (rather than one row in a wide table) so a job with
+         several parts — some possibly split across printers — stays easy to scan. */
       html += '<div class="card card-pad" style="margin-bottom:18px;">';
       html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Parts</h3>';
-      html += '<p class="hint" style="margin-bottom:12px;">One finished unit needs all of these parts — e.g. a lid and a base. Each gets its own plate size, print time and waste; quantities scale with the order quantity above.</p>';
+      html += '<p class="hint" style="margin-bottom:14px;">One finished unit needs all of these parts — e.g. a lid and a base. Each gets its own plate size, print time and waste; quantities scale with the order quantity above.</p>';
       if(!activePrinters.length){
-        html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
+        html += '<p class="hint" style="margin-bottom:14px;">No active printers yet — add one on the Printers tab.</p>';
       }
-      html += '<div class="table-wrap"><table><thead><tr><th>Part name</th><th>Printer</th><th>Split</th><th>Qty / unit</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Plates</th><th>Hours</th><th>Filament</th><th></th></tr></thead><tbody id="calc-parts-body">';
+      html += '<div id="calc-parts-body">';
       (calc.parts && calc.parts.length ? calc.parts : (calc.parts = [blankPart()])).forEach(function(part, i){
         // Plates/hours/filament cost for this part come straight from the same calcResult()
         // used to save the quote (not re-derived here) — one source of truth that already
@@ -2216,63 +2301,72 @@
         var plates = partResult ? partResult.plates : 0;
         var hours = partResult ? partResult.totalPrintHours : 0;
         var partFilCost = partResult ? partResult.filamentCost : 0;
-        html += '<tr data-idx="'+i+'">' +
-          '<td><input class="calc-part-name" type="text" style="min-width:120px;" placeholder="e.g. Lid" value="'+esc(part.name)+'"></td>';
+        html += '<div class="part-card" data-idx="'+i+'">';
+        html += '<div class="part-card-top">' +
+          '<input class="calc-part-name" type="text" placeholder="e.g. Lid" value="'+esc(part.name)+'">' +
+          '<button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-part data-idx="'+i+'" title="Remove this part">✕</button>' +
+          '</div>';
+        html += '<div class="part-card-grid">';
         if(part.splitEnabled){
-          html += '<td><span class="hint" style="font-size:12px; white-space:nowrap;">Split × '+((part.printerSplits&&part.printerSplits.length)||1)+'</span></td>';
+          html += '<div class="field"><label>Printer</label><div class="hint" style="margin-top:10px; white-space:nowrap;">Split × '+((part.printerSplits&&part.printerSplits.length)||1)+'</div></div>';
         } else {
-          html += '<td><select class="calc-part-printer" style="min-width:110px;">' + (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(part.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') + '</select></td>';
+          html += '<div class="field"><label>Printer</label><select class="calc-part-printer">' + (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(part.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') + '</select></div>';
         }
-        html += '<td><label style="display:flex; align-items:center; gap:4px; font-size:11.5px; color:var(--ink-faint); white-space:nowrap;"><input type="checkbox" class="calc-part-split-toggle"'+(part.splitEnabled?' checked':'')+'> Split</label></td>' +
-          '<td><input class="calc-part-qtyperunit mono" type="number" min="1" step="1" style="width:70px;" value="'+(part.qtyPerUnit||1)+'"></td>';
-        if(part.splitEnabled){
-          html += '<td class="hint" style="text-align:center;">—</td><td class="hint" style="text-align:center;">—</td><td class="hint" style="text-align:center;">—</td>';
-        } else {
-          html += '<td><input class="calc-part-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(part.unitsPerPlate||1)+'"></td>' +
-            '<td><input class="calc-part-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(part.printTimePerPlate)+'"></td>' +
-            '<td><input class="calc-part-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(part.wasteGrams)+'"></td>';
+        html += '<div class="field part-split-toggle-field"><label><input type="checkbox" class="calc-part-split-toggle"'+(part.splitEnabled?' checked':'')+'> Split across printers</label></div>';
+        html += '<div class="field"><label>Qty / unit</label><input class="calc-part-qtyperunit mono" type="number" min="1" step="1" value="'+(part.qtyPerUnit||1)+'"></div>';
+        if(!part.splitEnabled){
+          html += '<div class="field"><label>Units / plate</label><input class="calc-part-upp mono" type="number" min="1" step="1" value="'+(part.unitsPerPlate||1)+'"></div>' +
+            '<div class="field"><label>Time / plate (h)</label><input class="calc-part-time mono" type="number" min="0" step="0.01" value="'+esc(part.printTimePerPlate)+'"></div>' +
+            '<div class="field"><label>Waste (g / plate)</label><input class="calc-part-waste mono" type="number" min="0" step="0.1" value="'+esc(part.wasteGrams)+'"></div>';
         }
-        html += '<td class="num-cell mono" data-part-plates>'+plates+'</td>' +
-          '<td class="num-cell mono" data-part-hours>'+hours.toFixed(2)+'</td>' +
-          '<td class="num-cell mono" data-part-filcost>'+fmtMoney(partFilCost)+'</td>' +
-          '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-part data-idx="'+i+'">✕</button></td>' +
-          '</tr>';
+        html += '</div>'; // part-card-grid
         if(part.splitEnabled){
           var legs = (part.printerSplits && part.printerSplits.length) ? part.printerSplits : (part.printerSplits = [blankPrinterSplitLeg()]);
-          html += '<tr class="calc-partsplit-wrap-row"><td colspan="11" style="padding:10px 12px 16px 34px; background:rgba(127,127,127,.06);">';
-          html += '<p class="hint" style="margin-bottom:8px;">This part needs '+partQtyNeededFor(part)+' in total (qty/unit × order quantity) — split across these printers, auto-balanced to finish around the same time. Adjust a quantity by hand any time, e.g. if a printer is already busy.</p>';
+          html += '<div class="leg-panel">';
+          html += '<p class="hint">This part needs '+partQtyNeededFor(part)+' in total (qty/unit × order quantity) — split across these printers, auto-balanced to finish around the same time. Each printer\'s quantity is multiplied by its own plates below to get its real filament total — adjust a quantity by hand any time, e.g. if a printer is already busy.</p>';
           if(!activePrinters.length){
             html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
           } else {
-            html += '<div class="table-wrap"><table><thead><tr><th>Printer</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Quantity</th><th>Plates</th><th>Finish time (h)</th><th></th></tr></thead><tbody>';
             legs.forEach(function(leg, li){
               var legUpp = Math.max(1, Number(leg.unitsPerPlate)||1);
               var legQty = Math.max(0, Number(leg.quantity)||0);
               var legPlates = legQty > 0 ? Math.ceil(legQty / legUpp) : 0;
               var legFinishHours = legPlates * (Number(leg.printTimePerPlate)||0);
-              html += '<tr class="calc-partsplit-leg-row" data-part-idx="'+i+'" data-leg-idx="'+li+'">' +
-                '<td><select class="calc-partsplit-printer" style="min-width:110px;">' + activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(leg.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></td>' +
-                '<td><input class="calc-partsplit-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(leg.unitsPerPlate||1)+'"></td>' +
-                '<td><input class="calc-partsplit-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(leg.printTimePerPlate)+'"></td>' +
-                '<td><input class="calc-partsplit-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(leg.wasteGrams)+'"></td>' +
-                '<td><input class="calc-partsplit-qty mono" type="number" min="0" step="1" style="width:80px;" value="'+legQty+'"></td>' +
-                '<td class="num-cell mono" data-partsplit-plates>'+legPlates+'</td>' +
-                '<td class="num-cell mono" data-partsplit-finish>'+legFinishHours.toFixed(2)+'</td>' +
-                '<td><button type="button" class="btn btn-sm btn-ghost btn-danger calc-partsplit-remove" data-part-idx="'+i+'" data-leg-idx="'+li+'">✕</button></td>' +
-                '</tr>';
+              var legResult = (partResult && partResult.isSplit && partResult.legs) ? partResult.legs[li] : null;
+              var legFilCost = legResult ? legResult.filamentCost : 0;
+              html += '<div class="leg-row calc-partsplit-leg-row" data-part-idx="'+i+'" data-leg-idx="'+li+'">';
+              html += '<div class="leg-row-grid">' +
+                '<div class="field"><label>Printer</label><select class="calc-partsplit-printer">' + activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(leg.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></div>' +
+                '<div class="field"><label>Units / plate</label><input class="calc-partsplit-upp mono" type="number" min="1" step="1" value="'+(leg.unitsPerPlate||1)+'"></div>' +
+                '<div class="field"><label>Time / plate (h)</label><input class="calc-partsplit-time mono" type="number" min="0" step="0.01" value="'+esc(leg.printTimePerPlate)+'"></div>' +
+                '<div class="field"><label>Waste (g / plate)</label><input class="calc-partsplit-waste mono" type="number" min="0" step="0.1" value="'+esc(leg.wasteGrams)+'"></div>' +
+                '<div class="field"><label>Quantity</label><input class="calc-partsplit-qty mono" type="number" min="0" step="1" value="'+legQty+'"></div>' +
+                '</div>';
+              html += '<div class="leg-row-foot">' +
+                '<span>Plates<b data-partsplit-plates>'+legPlates+'</b></span>' +
+                '<span>Finish<b data-partsplit-finish>'+legFinishHours.toFixed(2)+'h</b></span>' +
+                '<span>Filament<b data-partsplit-filament>'+fmtMoney(legFilCost)+'</b></span>' +
+                '<button type="button" class="btn btn-sm btn-ghost btn-danger calc-partsplit-remove" data-part-idx="'+i+'" data-leg-idx="'+li+'">✕ Remove printer</button>' +
+                '</div>';
+              html += '</div>'; // leg-row
             });
-            html += '</tbody></table></div>';
-            html += '<div style="margin-top:8px; display:flex; gap:8px;">';
-            html += '<button type="button" class="btn btn-sm calc-partsplit-add" data-part-idx="'+i+'">+ Add printer</button>';
-            html += '<button type="button" class="btn btn-sm btn-ghost calc-partsplit-balance" data-part-idx="'+i+'" title="Recompute a balanced split from this part\'s total quantity, overwriting any manual adjustments">⚖ Balance evenly</button>';
-            html += '</div>';
+            html += '<div class="leg-actions">' +
+              '<button type="button" class="btn btn-sm calc-partsplit-add" data-part-idx="'+i+'">+ Add printer</button>' +
+              '<button type="button" class="btn btn-sm btn-ghost calc-partsplit-balance" data-part-idx="'+i+'" title="Recompute a balanced split from this part\'s total quantity, overwriting any manual adjustments">⚖ Balance evenly</button>' +
+              '</div>';
           }
-          html += '</td></tr>';
+          html += '</div>'; // leg-panel
         }
+        html += '<div class="part-card-foot">' +
+          '<span>Plates<b data-part-plates>'+plates+'</b></span>' +
+          '<span>Hours<b data-part-hours>'+hours.toFixed(2)+'</b></span>' +
+          '<span>Filament<b data-part-filcost>'+fmtMoney(partFilCost)+'</b></span>' +
+          '</div>';
+        html += '</div>'; // part-card
       });
-      html += '</tbody></table></div>';
-      html += '<div style="margin-top:8px;"><button type="button" class="btn btn-sm" id="calc-add-part">+ Add part</button></div>';
-      html += '<div class="totals" style="margin-top:14px; max-width:360px;">' +
+      html += '</div>'; // calc-parts-body
+      html += '<div style="margin-top:2px;"><button type="button" class="btn btn-sm" id="calc-add-part">+ Add part</button></div>';
+      html += '<div class="totals" style="margin-top:16px; max-width:360px;">' +
         '<div class="totals-row"><span>Total plates</span><span class="mono" id="calc-parts-out-plates">'+r.plates+'</span></div>' +
         '<div class="totals-row"><span>Total print hours (all printers)</span><span class="mono" id="calc-parts-out-hours">'+r.totalPrintHours.toFixed(2)+'</span></div>' +
         '<div class="totals-row total"><span>Estimated turnaround (slowest printer)</span><span class="mono" id="calc-parts-out-turnaround">'+(r.turnaroundHours||0).toFixed(2)+'</span></div>' +
@@ -2282,34 +2376,41 @@
       /* ---- printer split ---- */
       html += '<div class="card card-pad" style="margin-bottom:18px;">';
       html += '<h3 style="font-size:14px; margin-bottom:4px; color:var(--ink-soft);">Printer split</h3>';
-      html += '<p class="hint" style="margin-bottom:12px;">Enter the total quantity above, then how many units fit on one plate and how long a plate takes on each printer. Quantity per printer is worked out automatically to keep them finishing around the same time — adjust it by hand any time, e.g. if a printer is already busy.</p>';
+      html += '<p class="hint" style="margin-bottom:14px;">Enter the total quantity above, then how many units fit on one plate and how long a plate takes on each printer. Quantity per printer is worked out automatically to keep them finishing around the same time — adjust it by hand any time, e.g. if a printer is already busy.</p>';
       if(!activePrinters.length){
         html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
       } else {
-        html += '<div class="table-wrap"><table><thead><tr><th>Printer</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Quantity</th><th>Plates</th><th>Finish time (h)</th><th></th></tr></thead><tbody id="calc-split-body">';
+        html += '<div id="calc-split-body">';
         (calc.printerSplits && calc.printerSplits.length ? calc.printerSplits : (calc.printerSplits = [blankPrinterSplitLeg()])).forEach(function(leg, i){
           var legUpp = Math.max(1, Number(leg.unitsPerPlate)||1);
           var legQty = Math.max(0, Number(leg.quantity)||0);
           var legPlates = legQty > 0 ? Math.ceil(legQty / legUpp) : 0;
           var legFinishHours = legPlates * (Number(leg.printTimePerPlate)||0);
-          html += '<tr data-idx="'+i+'">' +
-            '<td><select class="calc-split-printer" style="min-width:110px;">' + activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(leg.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></td>' +
-            '<td><input class="calc-split-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(leg.unitsPerPlate||1)+'"></td>' +
-            '<td><input class="calc-split-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(leg.printTimePerPlate)+'"></td>' +
-            '<td><input class="calc-split-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(leg.wasteGrams)+'"></td>' +
-            '<td><input class="calc-split-qty mono" type="number" min="0" step="1" style="width:80px;" value="'+legQty+'"></td>' +
-            '<td class="num-cell mono" data-split-plates>'+legPlates+'</td>' +
-            '<td class="num-cell mono" data-split-finish>'+legFinishHours.toFixed(2)+'</td>' +
-            '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-split-leg data-idx="'+i+'">✕</button></td>' +
-            '</tr>';
+          var legResult = (r.isSplit && r.legs) ? r.legs[i] : null;
+          var legFilCost = legResult ? legResult.filamentCost : 0;
+          html += '<div class="leg-row" data-idx="'+i+'">';
+          html += '<div class="leg-row-grid">' +
+            '<div class="field"><label>Printer</label><select class="calc-split-printer">' + activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(leg.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></div>' +
+            '<div class="field"><label>Units / plate</label><input class="calc-split-upp mono" type="number" min="1" step="1" value="'+(leg.unitsPerPlate||1)+'"></div>' +
+            '<div class="field"><label>Time / plate (h)</label><input class="calc-split-time mono" type="number" min="0" step="0.01" value="'+esc(leg.printTimePerPlate)+'"></div>' +
+            '<div class="field"><label>Waste (g / plate)</label><input class="calc-split-waste mono" type="number" min="0" step="0.1" value="'+esc(leg.wasteGrams)+'"></div>' +
+            '<div class="field"><label>Quantity</label><input class="calc-split-qty mono" type="number" min="0" step="1" value="'+legQty+'"></div>' +
+            '</div>';
+          html += '<div class="leg-row-foot">' +
+            '<span>Plates<b data-split-plates>'+legPlates+'</b></span>' +
+            '<span>Finish<b data-split-finish>'+legFinishHours.toFixed(2)+'h</b></span>' +
+            '<span>Filament<b data-split-filament>'+fmtMoney(legFilCost)+'</b></span>' +
+            '<button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-split-leg data-idx="'+i+'">✕ Remove printer</button>' +
+            '</div>';
+          html += '</div>'; // leg-row
         });
-        html += '</tbody></table></div>';
-        html += '<div style="margin-top:8px; display:flex; gap:8px;">';
-        html += '<button type="button" class="btn btn-sm" id="calc-add-split-leg">+ Add printer</button>';
-        html += '<button type="button" class="btn btn-sm btn-ghost" id="calc-balance-split-btn" title="Recompute a balanced split from the total quantity, overwriting any manual adjustments">⚖ Balance evenly</button>';
-        html += '</div>';
+        html += '</div>'; // calc-split-body
+        html += '<div class="leg-actions">' +
+          '<button type="button" class="btn btn-sm" id="calc-add-split-leg">+ Add printer</button>' +
+          '<button type="button" class="btn btn-sm btn-ghost" id="calc-balance-split-btn" title="Recompute a balanced split from the total quantity, overwriting any manual adjustments">⚖ Balance evenly</button>' +
+          '</div>';
       }
-      html += '<div class="totals" style="margin-top:14px; max-width:360px;">' +
+      html += '<div class="totals" style="margin-top:16px; max-width:360px;">' +
         '<div class="totals-row"><span>Total quantity</span><span class="mono" id="calc-split-out-qty">'+r.quantity+'</span></div>' +
         '<div class="totals-row"><span>Total plates</span><span class="mono" id="calc-split-out-plates">'+r.plates+'</span></div>' +
         '<div class="totals-row"><span>Total print hours (all printers)</span><span class="mono" id="calc-split-out-hours">'+r.totalPrintHours.toFixed(2)+'</span></div>' +
@@ -2358,7 +2459,9 @@
           '<td>' + esc(m.materialType||'—') + '</td>' +
           splitLegsForFil.map(function(leg, i){
             var g = (leg.filamentGrams && leg.filamentGrams[m.id]) || '';
-            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'" data-leg-idx="'+i+'"></td>';
+            var plates = filColumnPlates(r, null, i);
+            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'" data-leg-idx="'+i+'">' +
+              '<div class="fil-total-hint" id="'+filTotalHintId(m.id, null, i)+'">'+esc(filTotalHintText(g, plates))+'</div></td>';
           }).join('') +
           '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
           '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
@@ -2396,7 +2499,9 @@
             var src = col.legIdx == null ? (partsForFil[col.partIdx].filamentGrams||{}) : (((partsForFil[col.partIdx].printerSplits||[])[col.legIdx]||{}).filamentGrams||{});
             var g = src[m.id] || '';
             var attrs = 'data-material-id="'+m.id+'" data-part-idx="'+col.partIdx+'"' + (col.legIdx != null ? ' data-leg-idx="'+col.legIdx+'"' : '');
-            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" '+attrs+'></td>';
+            var plates = filColumnPlates(r, col.partIdx, col.legIdx);
+            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" '+attrs+'>' +
+              '<div class="fil-total-hint" id="'+filTotalHintId(m.id, col.partIdx, col.legIdx)+'">'+esc(filTotalHintText(g, plates))+'</div></td>';
           }).join('') +
           '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
           '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
@@ -2407,10 +2512,12 @@
       html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th><th>Grams</th><th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
       activeMaterials.forEach(function(m){
         var g = calc.filamentGrams[m.id] || '';
+        var plateHint = calc.calcType === 'plate' ? filTotalHintText(g, r.plates||0) : '';
         html += '<tr data-material-id="'+m.id+'">' +
           '<td>' + esc(m.colour) + '</td>' +
           '<td>' + esc(m.materialType||'—') + '</td>' +
-          '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'"></td>' +
+          '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'">' +
+          (calc.calcType==='plate' ? '<div class="fil-total-hint" id="'+filTotalHintId(m.id, null, 'p')+'">'+esc(plateHint)+'</div>' : '') + '</td>' +
           '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
           '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
           '</tr>';
@@ -2587,78 +2694,87 @@
     html += '</tbody></table></div>';
     return html;
   }
-  function refreshSplitRows(){
-    // Lightweight DOM sync for the printer-split table after autoBalanceSplit() (or any
-    // per-leg edit) changes calc.printerSplits — updates quantity/plates/finish-time cells
+  function refreshSplitRows(r){
+    // Lightweight DOM sync for the printer-split leg cards after autoBalanceSplit() (or any
+    // per-leg edit) changes calc.printerSplits — updates quantity/plates/finish-time/filament
     // in place instead of a full render(), so focus/caret position in whichever field the
     // user is actively typing in is preserved.
     var body = document.getElementById('calc-split-body');
     if(!body || !calc.printerSplits) return;
+    if(!r) r = calcResult();
     var active = document.activeElement;
     calc.printerSplits.forEach(function(leg, i){
-      var tr = body.querySelector('tr[data-idx="'+i+'"]');
-      if(!tr) return;
+      var row = body.querySelector('.leg-row[data-idx="'+i+'"]');
+      if(!row) return;
       var legUpp = Math.max(1, Number(leg.unitsPerPlate)||1);
       var legQty = Math.max(0, Number(leg.quantity)||0);
       var legPlates = legQty > 0 ? Math.ceil(legQty / legUpp) : 0;
       var legFinishHours = legPlates * (Number(leg.printTimePerPlate)||0);
-      var qtyInput = tr.querySelector('.calc-split-qty');
+      var legResult = (r.isSplit && r.legs) ? r.legs[i] : null;
+      var qtyInput = row.querySelector('.calc-split-qty');
       if(qtyInput && qtyInput !== active) qtyInput.value = String(legQty);
-      var platesCell = tr.querySelector('[data-split-plates]');
+      var platesCell = row.querySelector('[data-split-plates]');
       if(platesCell) platesCell.textContent = String(legPlates);
-      var finishCell = tr.querySelector('[data-split-finish]');
-      if(finishCell) finishCell.textContent = legFinishHours.toFixed(2);
+      var finishCell = row.querySelector('[data-split-finish]');
+      if(finishCell) finishCell.textContent = legFinishHours.toFixed(2)+'h';
+      var filCell = row.querySelector('[data-split-filament]');
+      if(filCell) filCell.textContent = fmtMoney(legResult ? legResult.filamentCost : 0);
     });
   }
   function refreshPartsRows(r){
-    // Same idea as refreshSplitRows() above, but for the parts/components table — updates
-    // each part's auto-computed plates/hours/filament-cost cells in place after a field edit.
-    // All three come straight from the same calcResult() used to save the quote (not
-    // re-derived here) so the live numbers always match what actually gets saved, whether the
-    // part is a normal single-printer part or one split across several printers — and so a
-    // "total" typed into a "per plate" field shows its inflated cost immediately, right next
-    // to the part, instead of only surfacing after the quote is saved.
+    // Same idea as refreshSplitRows() above, but for the parts card list — updates each
+    // part's auto-computed plates/hours/filament-cost in place after a field edit. All three
+    // come straight from the same calcResult() used to save the quote (not re-derived here)
+    // so the live numbers always match what actually gets saved, whether the part is a normal
+    // single-printer part or one split across several printers — and so a "total" typed into a
+    // "per plate" field shows its inflated cost immediately, right next to the part, instead of
+    // only surfacing after the quote is saved.
     var body = document.getElementById('calc-parts-body');
     if(!body || !calc.parts) return;
     if(!r) r = calcResult();
     calc.parts.forEach(function(part, i){
-      var tr = body.querySelector('tr[data-idx="'+i+'"]');
-      if(!tr) return;
+      var card = body.querySelector('.part-card[data-idx="'+i+'"]');
+      if(!card) return;
       var partResult = (r.parts || [])[i];
       var plates = partResult ? partResult.plates : 0;
       var hours = partResult ? partResult.totalPrintHours : 0;
-      var platesCell = tr.querySelector('[data-part-plates]');
+      var platesCell = card.querySelector('[data-part-plates]');
       if(platesCell) platesCell.textContent = String(plates);
-      var hoursCell = tr.querySelector('[data-part-hours]');
+      var hoursCell = card.querySelector('[data-part-hours]');
       if(hoursCell) hoursCell.textContent = hours.toFixed(2);
-      var filCostCell = tr.querySelector('[data-part-filcost]');
+      var filCostCell = card.querySelector('[data-part-filcost]');
       if(filCostCell) filCostCell.textContent = fmtMoney(partResult ? partResult.filamentCost : 0);
     });
-    refreshPartSplitRows();
+    refreshPartSplitRows(r);
   }
-  function refreshPartSplitRows(){
-    // Mirrors refreshSplitRows() above, but for each split part's own nested leg table —
-    // updates quantity/plates/finish-time cells in place after autoBalancePartSplit() (or any
-    // per-leg edit) changes a part's printerSplits, preserving focus/caret in whichever field
-    // the user is actively typing in.
+  function refreshPartSplitRows(r){
+    // Mirrors refreshSplitRows() above, but for each split part's own nested leg cards —
+    // updates quantity/plates/finish-time/filament in place after autoBalancePartSplit() (or
+    // any per-leg edit) changes a part's printerSplits, preserving focus/caret in whichever
+    // field the user is actively typing in.
     var body = document.getElementById('calc-parts-body');
     if(!body || !calc.parts) return;
+    if(!r) r = calcResult();
     var active = document.activeElement;
     calc.parts.forEach(function(part, pIdx){
       if(!part.splitEnabled || !part.printerSplits) return;
+      var partResult = (r.parts || [])[pIdx];
       part.printerSplits.forEach(function(leg, lIdx){
-        var tr = body.querySelector('tr.calc-partsplit-leg-row[data-part-idx="'+pIdx+'"][data-leg-idx="'+lIdx+'"]');
-        if(!tr) return;
+        var row = body.querySelector('.calc-partsplit-leg-row[data-part-idx="'+pIdx+'"][data-leg-idx="'+lIdx+'"]');
+        if(!row) return;
         var legUpp = Math.max(1, Number(leg.unitsPerPlate)||1);
         var legQty = Math.max(0, Number(leg.quantity)||0);
         var legPlates = legQty > 0 ? Math.ceil(legQty / legUpp) : 0;
         var legFinishHours = legPlates * (Number(leg.printTimePerPlate)||0);
-        var qtyInput = tr.querySelector('.calc-partsplit-qty');
+        var legResult = (partResult && partResult.isSplit && partResult.legs) ? partResult.legs[lIdx] : null;
+        var qtyInput = row.querySelector('.calc-partsplit-qty');
         if(qtyInput && qtyInput !== active) qtyInput.value = String(legQty);
-        var platesCell = tr.querySelector('[data-partsplit-plates]');
+        var platesCell = row.querySelector('[data-partsplit-plates]');
         if(platesCell) platesCell.textContent = String(legPlates);
-        var finishCell = tr.querySelector('[data-partsplit-finish]');
-        if(finishCell) finishCell.textContent = legFinishHours.toFixed(2);
+        var finishCell = row.querySelector('[data-partsplit-finish]');
+        if(finishCell) finishCell.textContent = legFinishHours.toFixed(2)+'h';
+        var filCell = row.querySelector('[data-partsplit-filament]');
+        if(filCell) filCell.textContent = fmtMoney(legResult ? legResult.filamentCost : 0);
       });
     });
   }
@@ -2676,13 +2792,27 @@
     set('calc-split-out-plates', String(r.plates));
     set('calc-split-out-hours', r.totalPrintHours.toFixed(2));
     set('calc-split-out-turnaround', (r.turnaroundHours||0).toFixed(2));
-    refreshSplitRows();
+    refreshSplitRows(r);
 
     var costByMaterial = {};
     r.filamentLines.forEach(function(l){ costByMaterial[l.materialId] = l.cost; });
     materials.forEach(function(m){
       var cell = document.getElementById('calc-fil-cost-'+m.id);
       if(cell) cell.textContent = fmtMoney(costByMaterial[m.id] || 0);
+    });
+    // Keep each filament field's live "× N plates = total g" hint in sync — the whole reason
+    // it exists is to make a per-plate figure's real (multiplied) total obvious as you type,
+    // not just after saving.
+    Array.prototype.forEach.call(document.querySelectorAll('.calc-fil-input'), function(inp){
+      var mid = inp.getAttribute('data-material-id');
+      var legIdxAttr = inp.getAttribute('data-leg-idx');
+      var partIdxAttr = inp.getAttribute('data-part-idx');
+      var partIdx = partIdxAttr !== null ? Number(partIdxAttr) : null;
+      var legIdx = legIdxAttr !== null ? Number(legIdxAttr) : (calc.calcType === 'plate' && partIdx === null ? 'p' : null);
+      if(partIdx === null && legIdx === null) return; // single-job mode — no plates multiplier, no hint
+      var plates = legIdx === 'p' ? (r.plates||0) : filColumnPlates(r, partIdx, legIdx);
+      var hintEl = document.getElementById(filTotalHintId(mid, partIdx, legIdx));
+      if(hintEl) hintEl.textContent = filTotalHintText(inp.value, plates);
     });
     set('calc-out-filament-raw', r.totalFilamentRawG.toFixed(1) + ' g');
     set('calc-out-filament-costed', r.totalFilamentCostedG.toFixed(1) + ' g');
@@ -2813,7 +2943,7 @@
     var splitBody = document.getElementById('calc-split-body');
     if(splitBody){
       splitBody.addEventListener('input', function(e){
-        var tr = e.target.closest('tr'); if(!tr) return;
+        var tr = e.target.closest('.leg-row'); if(!tr) return;
         var idx = Number(tr.getAttribute('data-idx'));
         var leg = calc.printerSplits[idx]; if(!leg) return;
         if(e.target.classList.contains('calc-split-qty')){
@@ -2834,7 +2964,7 @@
       });
       splitBody.addEventListener('change', function(e){
         if(!e.target.classList.contains('calc-split-printer')) return;
-        var tr = e.target.closest('tr'); var idx = Number(tr.getAttribute('data-idx'));
+        var tr = e.target.closest('.leg-row'); var idx = Number(tr.getAttribute('data-idx'));
         var leg = calc.printerSplits[idx]; if(!leg) return;
         leg.printerId = e.target.value;
         var p = printers.find(function(x){return x.id===leg.printerId;});
@@ -2869,7 +2999,7 @@
         // A part-split leg's own fields (inside the nested table) — handled first and
         // separately since these rows carry data-part-idx/data-leg-idx instead of the
         // top-level row's data-idx.
-        var legRow = e.target.closest('tr.calc-partsplit-leg-row');
+        var legRow = e.target.closest('.calc-partsplit-leg-row');
         if(legRow){
           var pIdx = Number(legRow.getAttribute('data-part-idx'));
           var lIdx = Number(legRow.getAttribute('data-leg-idx'));
@@ -2893,7 +3023,7 @@
           updateCalcOutputs();
           return;
         }
-        var tr = e.target.closest('tr[data-idx]'); if(!tr) return;
+        var tr = e.target.closest('.part-card[data-idx]'); if(!tr) return;
         var idx = Number(tr.getAttribute('data-idx'));
         var part = calc.parts[idx]; if(!part) return;
         if(e.target.classList.contains('calc-part-name')) part.name = e.target.value;
@@ -2922,7 +3052,7 @@
       });
       partsBody.addEventListener('change', function(e){
         if(e.target.classList.contains('calc-partsplit-printer')){
-          var legRow = e.target.closest('tr.calc-partsplit-leg-row');
+          var legRow = e.target.closest('.calc-partsplit-leg-row');
           var pIdx = Number(legRow.getAttribute('data-part-idx'));
           var lIdx = Number(legRow.getAttribute('data-leg-idx'));
           var splitPart = calc.parts[pIdx]; if(!splitPart) return;
@@ -2937,7 +3067,7 @@
           return;
         }
         if(e.target.classList.contains('calc-part-split-toggle')){
-          var tr2 = e.target.closest('tr[data-idx]'); var idx2 = Number(tr2.getAttribute('data-idx'));
+          var tr2 = e.target.closest('.part-card[data-idx]'); var idx2 = Number(tr2.getAttribute('data-idx'));
           var part2 = calc.parts[idx2]; if(!part2) return;
           part2.splitEnabled = e.target.checked;
           if(part2.splitEnabled){
@@ -2948,7 +3078,7 @@
           return;
         }
         if(!e.target.classList.contains('calc-part-printer')) return;
-        var tr = e.target.closest('tr'); var idx = Number(tr.getAttribute('data-idx'));
+        var tr = e.target.closest('.part-card'); var idx = Number(tr.getAttribute('data-idx'));
         var part = calc.parts[idx]; if(!part) return;
         part.printerId = e.target.value;
         var p = printers.find(function(x){return x.id===part.printerId;});
