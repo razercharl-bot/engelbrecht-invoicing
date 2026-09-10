@@ -487,7 +487,17 @@
   }
   function blankPart(){
     var p = printers.find(function(x){ return x.active !== false; });
-    return { name: '', printerId: p ? p.id : '', qtyPerUnit: 1, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: p ? (Number(p.defaultWasteGrams)||0) : (spSettings.defaultWasteGrams||0), filamentGrams: {} };
+    return {
+      name: '', printerId: p ? p.id : '', qtyPerUnit: 1, unitsPerPlate: 1, printTimePerPlate: '', wasteGrams: p ? (Number(p.defaultWasteGrams)||0) : (spSettings.defaultWasteGrams||0), filamentGrams: {},
+      // A single part can itself need splitting across more than one printer (e.g. a batch of
+      // one component too big to finish on one machine in time) — distinct from a different
+      // PART using a different printer (that's just part.printerId above). Same shape/semantics
+      // as job.printerSplits: this part's own qty-needed (qtyPerUnit × order quantity) gets
+      // divided across these legs, auto-balanced to finish around the same time. Only used
+      // when splitEnabled; printerId/unitsPerPlate/printTimePerPlate/wasteGrams/filamentGrams
+      // above are ignored while it's on (mirrors job.splitEnabled vs job.printerId etc.).
+      splitEnabled: false, printerSplits: []
+    };
   }
   function blankPrinterSplitLeg(){
     var p = printers.find(function(x){ return x.active !== false; });
@@ -534,6 +544,23 @@
     if(!calc.printerSplits || !calc.printerSplits.length) return;
     var qtys = computeAutoScheduleQuantities(calc.quantity, calc.printerSplits);
     calc.printerSplits.forEach(function(leg, i){ leg.quantity = qtys[i] || 0; });
+  }
+  /* How many of ONE part are needed in total (before splitting across that part's own
+     printers, if any) — qty/unit × the order's finished-unit quantity. Reads calc directly
+     (like autoBalanceSplit reads calc.quantity) since it's only ever called from Calculator
+     render/event code. */
+  function partQtyNeededFor(part){
+    var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
+    return Math.max(0, Number(calc.quantity)||0) * qtyPerUnit;
+  }
+  /* Same idea as autoBalanceSplit() above, but scoped to one PART's own printerSplits legs —
+     used when a single part (within "Multiple parts (assembly)" mode) is itself split across
+     more than one printer. totalQtyNeeded is that part's own requirement (see
+     partQtyNeededFor), not the order quantity directly. */
+  function autoBalancePartSplit(part, totalQtyNeeded){
+    if(!part || !part.printerSplits || !part.printerSplits.length) return;
+    var qtys = computeAutoScheduleQuantities(totalQtyNeeded, part.printerSplits);
+    part.printerSplits.forEach(function(leg, i){ leg.quantity = qtys[i] || 0; });
   }
   function printerMachineRate(printer){
     if(!printer) return {depreciationPerHour:0, maintenancePerHour:0, hourlyRate:0};
@@ -681,11 +708,14 @@
      other) are shared once across the whole order rather than duplicated per printer.
      Reuses computeJobCost per leg (and once for the order-level costs, with printer:null so
      filament/electricity/machine come back zero) rather than re-deriving any formula. */
-  function computeSplitJobCost(job, printersById, materialsById, consumablesById, settings){
-    var legs = (job.printerSplits && job.printerSplits.length) ? job.printerSplits : [blankPrinterSplitLeg()];
-    var failureAllowancePct = Number(job.failureAllowancePct)||0;
-
-    var legResults = legs.map(function(leg){
+  /* Costs each leg of a printer split — shared by computeSplitJobCost (a whole job split
+     across printers) and computeMultiPartJobCost (a single PART, within a multi-part job,
+     split across printers). legs: array of {printerId, quantity, unitsPerPlate,
+     printTimePerPlate, wasteGrams, filamentGrams} — quantity is each leg's own share, already
+     decided (by autoBalanceSplit / autoBalancePartSplit, or a manual override), not derived
+     here. Pure — no globals read. */
+  function computeSplitLegs(legs, printersById, materialsById, settings, failureAllowancePct){
+    return legs.map(function(leg){
       var printer = printersById[leg.printerId] || null;
       var unitsPerPlate = Math.max(1, Number(leg.unitsPerPlate)||1);
       var legQuantity = Math.max(0, Number(leg.quantity)||0);
@@ -729,6 +759,11 @@
         electricityCost: r.electricityCost, machineCost: r.machineCost, machineHourlyRate: r.machineHourlyRate
       };
     });
+  }
+  function computeSplitJobCost(job, printersById, materialsById, consumablesById, settings){
+    var legs = (job.printerSplits && job.printerSplits.length) ? job.printerSplits : [blankPrinterSplitLeg()];
+    var failureAllowancePct = Number(job.failureAllowancePct)||0;
+    var legResults = computeSplitLegs(legs, printersById, materialsById, settings, failureAllowancePct);
 
     var orderLevelJob = {
       calcType: 'single', quantity: 1, filamentGrams: {}, wasteGrams: 0, failureAllowancePct: 0, printTimeHours: 0,
@@ -795,10 +830,47 @@
     var failureAllowancePct = Number(job.failureAllowancePct)||0;
 
     var partResults = parts.map(function(part){
-      var printer = printersById[part.printerId] || null;
       var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
-      var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
       var partQtyNeeded = quantity * qtyPerUnit;
+
+      if(part.splitEnabled){
+        // This one part is itself split across more than one printer (e.g. a batch too big
+        // to finish on one machine in time) — reuses the exact same leg-costing logic as a
+        // whole-job printer split, just scoped to this part's own qty needed rather than the
+        // whole order. Each leg picks its own printer, plate size/time/waste and filament.
+        var legs = (part.printerSplits && part.printerSplits.length) ? part.printerSplits : [blankPrinterSplitLeg()];
+        var legResults = computeSplitLegs(legs, printersById, materialsById, settings, failureAllowancePct);
+        var totalPrintHoursPart = legResults.reduce(function(s,l){ return s + l.totalPrintHours; }, 0);
+        var turnaroundPart = legResults.reduce(function(m,l){ return Math.max(m, l.totalPrintHours); }, 0);
+        var platesPart = legResults.reduce(function(s,l){ return s + l.plates; }, 0);
+        var filamentCostPart = legResults.reduce(function(s,l){ return s + l.filamentCost; }, 0);
+        var electricityCostPart = legResults.reduce(function(s,l){ return s + l.electricityCost; }, 0);
+        var machineCostPart = legResults.reduce(function(s,l){ return s + l.machineCost; }, 0);
+        var filamentLinesByIdPart = {};
+        legResults.forEach(function(leg){
+          leg.filamentLines.forEach(function(l){
+            var existing = filamentLinesByIdPart[l.materialId];
+            if(existing){
+              existing.grams += l.grams; existing.costedGrams += l.costedGrams; existing.cost += l.cost;
+            } else {
+              filamentLinesByIdPart[l.materialId] = { materialId:l.materialId, colour:l.colour, materialType:l.materialType, grams:l.grams, costedGrams:l.costedGrams, pricePerKg:l.pricePerKg, cost:l.cost };
+            }
+          });
+        });
+        var filamentLinesPart = Object.keys(filamentLinesByIdPart).map(function(k){ return filamentLinesByIdPart[k]; });
+        return {
+          name: part.name || '', printerId: '', printerName: 'Split across ' + legResults.length + ' printers',
+          qtyPerUnit: qtyPerUnit, qtyNeeded: partQtyNeeded, unitsPerPlate: null, plates: platesPart,
+          printTimePerPlate: null, totalPrintHours: totalPrintHoursPart,
+          wasteGramsPerPlate: null,
+          filamentLines: filamentLinesPart, filamentCost: filamentCostPart,
+          electricityCost: electricityCostPart, machineCost: machineCostPart, machineHourlyRate: null,
+          isSplit: true, legs: legResults, turnaroundHours: turnaroundPart
+        };
+      }
+
+      var printer = printersById[part.printerId] || null;
+      var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
       var plates = Math.ceil(partQtyNeeded / unitsPerPlate);
       var printTimePerPlate = Number(part.printTimePerPlate)||0;
       // Grams-per-PLATE for THIS part, same convention as the printer split's per-leg grams —
@@ -823,7 +895,8 @@
         printTimePerPlate: printTimePerPlate, totalPrintHours: r.totalPrintHours,
         wasteGramsPerPlate: Number(part.wasteGrams)||0,
         filamentLines: r.filamentLines, filamentCost: r.filamentCost,
-        electricityCost: r.electricityCost, machineCost: r.machineCost, machineHourlyRate: r.machineHourlyRate
+        electricityCost: r.electricityCost, machineCost: r.machineCost, machineHourlyRate: r.machineHourlyRate,
+        isSplit: false
       };
     });
 
@@ -841,8 +914,18 @@
     // "turnaround vs total hours" distinction as the printer split above, just grouped by
     // each part's own printer instead of by leg.
     var totalPrintHours = partResults.reduce(function(s,p){ return s + p.totalPrintHours; }, 0);
+    // Turnaround = the busiest single PHYSICAL printer's total booked hours across every part
+    // (a printer can only do one thing at a time, whether that time comes from one part or is
+    // shared with a split part's own leg on that same machine) — so a split part's legs are
+    // attributed to their own real printers here too, not lumped under the part itself.
     var hoursByPartPrinter = {};
-    partResults.forEach(function(p){ var key = p.printerId||''; hoursByPartPrinter[key] = (hoursByPartPrinter[key]||0) + p.totalPrintHours; });
+    partResults.forEach(function(p){
+      if(p.isSplit && p.legs){
+        p.legs.forEach(function(l){ var key = l.printerId||''; hoursByPartPrinter[key] = (hoursByPartPrinter[key]||0) + l.totalPrintHours; });
+      } else {
+        var key = p.printerId||''; hoursByPartPrinter[key] = (hoursByPartPrinter[key]||0) + p.totalPrintHours;
+      }
+    });
     var turnaroundHours = Object.keys(hoursByPartPrinter).reduce(function(m,k){ return Math.max(m, hoursByPartPrinter[k]); }, 0);
     var filamentCost = partResults.reduce(function(s,p){ return s + p.filamentCost; }, 0);
     var electricityCost = partResults.reduce(function(s,p){ return s + p.electricityCost; }, 0);
@@ -947,7 +1030,18 @@
         name: p.name, printerId: p.printerId, printerName: p.printerName, qtyPerUnit: p.qtyPerUnit, qtyNeeded: p.qtyNeeded, unitsPerPlate: p.unitsPerPlate,
         plates: p.plates, printTimePerPlate: p.printTimePerPlate, totalPrintHours: p.totalPrintHours,
         wasteGramsPerPlate: p.wasteGramsPerPlate, filamentCost: p.filamentCost, electricityCost: p.electricityCost,
-        machineCost: p.machineCost, machineHourlyRate: p.machineHourlyRate
+        machineCost: p.machineCost, machineHourlyRate: p.machineHourlyRate,
+        // Frozen leg breakdown when this one part was itself split across printers — mirrors
+        // `legs` above but scoped to this part, so the quote view and Dashboard utilisation
+        // can attribute hours/cost to the real printers instead of the part's own placeholder
+        // "Split across N printers" name.
+        isSplit: !!p.isSplit, turnaroundHours: p.turnaroundHours||0,
+        legs: p.isSplit ? p.legs.map(function(l){ return {
+          printerId: l.printerId, printerName: l.printerName, quantity: l.quantity, unitsPerPlate: l.unitsPerPlate,
+          plates: l.plates, printTimePerPlate: l.printTimePerPlate, totalPrintHours: l.totalPrintHours,
+          wasteGramsPerPlate: l.wasteGramsPerPlate, filamentCost: l.filamentCost, electricityCost: l.electricityCost,
+          machineCost: l.machineCost, machineHourlyRate: l.machineHourlyRate
+        }; }) : []
       }; }) : [],
       partsInput: calc.calcType === 'parts' ? JSON.parse(JSON.stringify(calc.parts || [])) : [],
       filamentLines: r.filamentLines, filamentGramsInput: JSON.parse(JSON.stringify(calc.filamentGrams || {})),
@@ -1768,7 +1862,13 @@
       if(q.isSplit){
         (q.legs||[]).forEach(function(l){ hoursByPrinter[l.printerId] = (hoursByPrinter[l.printerId]||0) + (Number(l.totalPrintHours)||0); });
       } else if(q.isMultiPart){
-        (q.parts||[]).forEach(function(p){ if(p.printerId) hoursByPrinter[p.printerId] = (hoursByPrinter[p.printerId]||0) + (Number(p.totalPrintHours)||0); });
+        (q.parts||[]).forEach(function(p){
+          if(p.isSplit){
+            (p.legs||[]).forEach(function(l){ hoursByPrinter[l.printerId] = (hoursByPrinter[l.printerId]||0) + (Number(l.totalPrintHours)||0); });
+          } else if(p.printerId){
+            hoursByPrinter[p.printerId] = (hoursByPrinter[p.printerId]||0) + (Number(p.totalPrintHours)||0);
+          }
+        });
       } else if(q.printerId){
         hoursByPrinter[q.printerId] = (hoursByPrinter[q.printerId]||0) + (Number(q.totalPrintHours)||0);
       }
@@ -2107,31 +2207,68 @@
       if(!activePrinters.length){
         html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
       }
-      html += '<div class="table-wrap"><table><thead><tr><th>Part name</th><th>Printer</th><th>Qty / unit</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Plates</th><th>Hours</th><th>Filament</th><th></th></tr></thead><tbody id="calc-parts-body">';
+      html += '<div class="table-wrap"><table><thead><tr><th>Part name</th><th>Printer</th><th>Split</th><th>Qty / unit</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Plates</th><th>Hours</th><th>Filament</th><th></th></tr></thead><tbody id="calc-parts-body">';
       (calc.parts && calc.parts.length ? calc.parts : (calc.parts = [blankPart()])).forEach(function(part, i){
-        var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
-        var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
-        var qtyNeeded = Math.max(0, Number(calc.quantity)||0) * qtyPerUnit;
-        var plates = qtyNeeded > 0 ? Math.ceil(qtyNeeded / unitsPerPlate) : 0;
-        var hours = plates * (Number(part.printTimePerPlate)||0);
-        // Live filament cost for THIS part alone, straight from the same calcResult() used to
-        // save the quote — lets you catch a "total" typed into a "per plate" field immediately
-        // (it'll jump far higher than expected the moment plates > 1) instead of only noticing
-        // after saving.
+        // Plates/hours/filament cost for this part come straight from the same calcResult()
+        // used to save the quote (not re-derived here) — one source of truth that already
+        // handles both a normal single-printer part and one split across several printers.
         var partResult = (r.parts || [])[i];
+        var plates = partResult ? partResult.plates : 0;
+        var hours = partResult ? partResult.totalPrintHours : 0;
         var partFilCost = partResult ? partResult.filamentCost : 0;
         html += '<tr data-idx="'+i+'">' +
-          '<td><input class="calc-part-name" type="text" style="min-width:120px;" placeholder="e.g. Lid" value="'+esc(part.name)+'"></td>' +
-          '<td><select class="calc-part-printer" style="min-width:110px;">' + (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(part.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') + '</select></td>' +
-          '<td><input class="calc-part-qtyperunit mono" type="number" min="1" step="1" style="width:70px;" value="'+(part.qtyPerUnit||1)+'"></td>' +
-          '<td><input class="calc-part-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(part.unitsPerPlate||1)+'"></td>' +
-          '<td><input class="calc-part-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(part.printTimePerPlate)+'"></td>' +
-          '<td><input class="calc-part-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(part.wasteGrams)+'"></td>' +
-          '<td class="num-cell mono" data-part-plates>'+plates+'</td>' +
+          '<td><input class="calc-part-name" type="text" style="min-width:120px;" placeholder="e.g. Lid" value="'+esc(part.name)+'"></td>';
+        if(part.splitEnabled){
+          html += '<td><span class="hint" style="font-size:12px; white-space:nowrap;">Split × '+((part.printerSplits&&part.printerSplits.length)||1)+'</span></td>';
+        } else {
+          html += '<td><select class="calc-part-printer" style="min-width:110px;">' + (activePrinters.length ? activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(part.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') : '<option value="">No active printers</option>') + '</select></td>';
+        }
+        html += '<td><label style="display:flex; align-items:center; gap:4px; font-size:11.5px; color:var(--ink-faint); white-space:nowrap;"><input type="checkbox" class="calc-part-split-toggle"'+(part.splitEnabled?' checked':'')+'> Split</label></td>' +
+          '<td><input class="calc-part-qtyperunit mono" type="number" min="1" step="1" style="width:70px;" value="'+(part.qtyPerUnit||1)+'"></td>';
+        if(part.splitEnabled){
+          html += '<td class="hint" style="text-align:center;">—</td><td class="hint" style="text-align:center;">—</td><td class="hint" style="text-align:center;">—</td>';
+        } else {
+          html += '<td><input class="calc-part-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(part.unitsPerPlate||1)+'"></td>' +
+            '<td><input class="calc-part-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(part.printTimePerPlate)+'"></td>' +
+            '<td><input class="calc-part-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(part.wasteGrams)+'"></td>';
+        }
+        html += '<td class="num-cell mono" data-part-plates>'+plates+'</td>' +
           '<td class="num-cell mono" data-part-hours>'+hours.toFixed(2)+'</td>' +
           '<td class="num-cell mono" data-part-filcost>'+fmtMoney(partFilCost)+'</td>' +
           '<td><button type="button" class="btn btn-sm btn-ghost btn-danger" data-remove-part data-idx="'+i+'">✕</button></td>' +
           '</tr>';
+        if(part.splitEnabled){
+          var legs = (part.printerSplits && part.printerSplits.length) ? part.printerSplits : (part.printerSplits = [blankPrinterSplitLeg()]);
+          html += '<tr class="calc-partsplit-wrap-row"><td colspan="11" style="padding:10px 12px 16px 34px; background:rgba(127,127,127,.06);">';
+          html += '<p class="hint" style="margin-bottom:8px;">This part needs '+partQtyNeededFor(part)+' in total (qty/unit × order quantity) — split across these printers, auto-balanced to finish around the same time. Adjust a quantity by hand any time, e.g. if a printer is already busy.</p>';
+          if(!activePrinters.length){
+            html += '<p class="hint">No active printers yet — add one on the Printers tab.</p>';
+          } else {
+            html += '<div class="table-wrap"><table><thead><tr><th>Printer</th><th>Units / plate</th><th>Time / plate (h)</th><th>Waste (g / plate)</th><th>Quantity</th><th>Plates</th><th>Finish time (h)</th><th></th></tr></thead><tbody>';
+            legs.forEach(function(leg, li){
+              var legUpp = Math.max(1, Number(leg.unitsPerPlate)||1);
+              var legQty = Math.max(0, Number(leg.quantity)||0);
+              var legPlates = legQty > 0 ? Math.ceil(legQty / legUpp) : 0;
+              var legFinishHours = legPlates * (Number(leg.printTimePerPlate)||0);
+              html += '<tr class="calc-partsplit-leg-row" data-part-idx="'+i+'" data-leg-idx="'+li+'">' +
+                '<td><select class="calc-partsplit-printer" style="min-width:110px;">' + activePrinters.map(function(p){ return '<option value="'+p.id+'"'+(leg.printerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>'; }).join('') + '</select></td>' +
+                '<td><input class="calc-partsplit-upp mono" type="number" min="1" step="1" style="width:80px;" value="'+(leg.unitsPerPlate||1)+'"></td>' +
+                '<td><input class="calc-partsplit-time mono" type="number" min="0" step="0.01" style="width:90px;" value="'+esc(leg.printTimePerPlate)+'"></td>' +
+                '<td><input class="calc-partsplit-waste mono" type="number" min="0" step="0.1" style="width:80px;" value="'+esc(leg.wasteGrams)+'"></td>' +
+                '<td><input class="calc-partsplit-qty mono" type="number" min="0" step="1" style="width:80px;" value="'+legQty+'"></td>' +
+                '<td class="num-cell mono" data-partsplit-plates>'+legPlates+'</td>' +
+                '<td class="num-cell mono" data-partsplit-finish>'+legFinishHours.toFixed(2)+'</td>' +
+                '<td><button type="button" class="btn btn-sm btn-ghost btn-danger calc-partsplit-remove" data-part-idx="'+i+'" data-leg-idx="'+li+'">✕</button></td>' +
+                '</tr>';
+            });
+            html += '</tbody></table></div>';
+            html += '<div style="margin-top:8px; display:flex; gap:8px;">';
+            html += '<button type="button" class="btn btn-sm calc-partsplit-add" data-part-idx="'+i+'">+ Add printer</button>';
+            html += '<button type="button" class="btn btn-sm btn-ghost calc-partsplit-balance" data-part-idx="'+i+'" title="Recompute a balanced split from this part\'s total quantity, overwriting any manual adjustments">⚖ Balance evenly</button>';
+            html += '</div>';
+          }
+          html += '</td></tr>';
+        }
       });
       html += '</tbody></table></div>';
       html += '<div style="margin-top:8px;"><button type="button" class="btn btn-sm" id="calc-add-part">+ Add part</button></div>';
@@ -2230,18 +2367,36 @@
       html += '</tbody></table></div>';
     } else if(calc.calcType === 'parts'){
       var partsForFil = (calc.parts && calc.parts.length) ? calc.parts : [blankPart()];
+      // A non-split part gets one filament column (its own filamentGrams); a part split across
+      // printers gets one column PER LEG (each leg's own filamentGrams) since different
+      // printers can genuinely use a different amount — or colour — of the same material.
+      var filCols = [];
+      partsForFil.forEach(function(part, pi){
+        if(part.splitEnabled){
+          var legsForFil = (part.printerSplits && part.printerSplits.length) ? part.printerSplits : [blankPrinterSplitLeg()];
+          legsForFil.forEach(function(leg, li){
+            var lp = printers.find(function(x){ return x.id === leg.printerId; });
+            var pname = lp ? lp.name : ('Printer ' + (li+1));
+            filCols.push({ partIdx: pi, legIdx: li, label: (part.name || ('Part ' + (pi+1))) + ' · ' + pname, suffix: ' · ' + pname + ' (g/plate)' });
+          });
+        } else {
+          filCols.push({ partIdx: pi, legIdx: null, label: part.name || ('Part ' + (pi+1)), suffix: ' (g/plate)' });
+        }
+      });
       html += '<div class="table-wrap"><table><thead><tr><th>Colour</th><th>Type</th>' +
-        partsForFil.map(function(part, i){
-          return '<th id="calc-fil-part-header-'+i+'">' + esc(part.name || ('Part ' + (i+1))) + ' (g/plate)</th>';
+        filCols.map(function(col, ci){
+          return '<th id="calc-fil-col-header-'+ci+'" data-fil-header-part-idx="'+col.partIdx+'" data-fil-header-suffix="'+esc(col.suffix)+'">' + esc(col.label) + ' (g/plate)</th>';
         }).join('') +
         '<th>Price / kg</th><th class="num-cell">Cost</th></tr></thead><tbody id="calc-fil-body">';
       activeMaterials.forEach(function(m){
         html += '<tr data-material-id="'+m.id+'">' +
           '<td>' + esc(m.colour) + '</td>' +
           '<td>' + esc(m.materialType||'—') + '</td>' +
-          partsForFil.map(function(part, i){
-            var g = (part.filamentGrams && part.filamentGrams[m.id]) || '';
-            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" data-material-id="'+m.id+'" data-part-idx="'+i+'"></td>';
+          filCols.map(function(col){
+            var src = col.legIdx == null ? (partsForFil[col.partIdx].filamentGrams||{}) : (((partsForFil[col.partIdx].printerSplits||[])[col.legIdx]||{}).filamentGrams||{});
+            var g = src[m.id] || '';
+            var attrs = 'data-material-id="'+m.id+'" data-part-idx="'+col.partIdx+'"' + (col.legIdx != null ? ' data-leg-idx="'+col.legIdx+'"' : '');
+            return '<td><input class="calc-fil-input mono" type="number" min="0" step="0.01" value="'+esc(g)+'" '+attrs+'></td>';
           }).join('') +
           '<td class="mono">' + fmtMoney(m.pricePerKg) + '</td>' +
           '<td class="num-cell mono" id="calc-fil-cost-'+m.id+'">' + fmtMoney(0) + '</td>' +
@@ -2458,8 +2613,9 @@
   function refreshPartsRows(r){
     // Same idea as refreshSplitRows() above, but for the parts/components table — updates
     // each part's auto-computed plates/hours/filament-cost cells in place after a field edit.
-    // Filament cost comes straight from the same calcResult() used to save the quote (not
-    // re-derived here) so the live number always matches what actually gets saved — and so a
+    // All three come straight from the same calcResult() used to save the quote (not
+    // re-derived here) so the live numbers always match what actually gets saved, whether the
+    // part is a normal single-printer part or one split across several printers — and so a
     // "total" typed into a "per plate" field shows its inflated cost immediately, right next
     // to the part, instead of only surfacing after the quote is saved.
     var body = document.getElementById('calc-parts-body');
@@ -2468,20 +2624,42 @@
     calc.parts.forEach(function(part, i){
       var tr = body.querySelector('tr[data-idx="'+i+'"]');
       if(!tr) return;
-      var qtyPerUnit = Math.max(1, Number(part.qtyPerUnit)||1);
-      var unitsPerPlate = Math.max(1, Number(part.unitsPerPlate)||1);
-      var qtyNeeded = Math.max(0, Number(calc.quantity)||0) * qtyPerUnit;
-      var plates = qtyNeeded > 0 ? Math.ceil(qtyNeeded / unitsPerPlate) : 0;
-      var hours = plates * (Number(part.printTimePerPlate)||0);
+      var partResult = (r.parts || [])[i];
+      var plates = partResult ? partResult.plates : 0;
+      var hours = partResult ? partResult.totalPrintHours : 0;
       var platesCell = tr.querySelector('[data-part-plates]');
       if(platesCell) platesCell.textContent = String(plates);
       var hoursCell = tr.querySelector('[data-part-hours]');
       if(hoursCell) hoursCell.textContent = hours.toFixed(2);
       var filCostCell = tr.querySelector('[data-part-filcost]');
-      if(filCostCell){
-        var partResult = (r.parts || [])[i];
-        filCostCell.textContent = fmtMoney(partResult ? partResult.filamentCost : 0);
-      }
+      if(filCostCell) filCostCell.textContent = fmtMoney(partResult ? partResult.filamentCost : 0);
+    });
+    refreshPartSplitRows();
+  }
+  function refreshPartSplitRows(){
+    // Mirrors refreshSplitRows() above, but for each split part's own nested leg table —
+    // updates quantity/plates/finish-time cells in place after autoBalancePartSplit() (or any
+    // per-leg edit) changes a part's printerSplits, preserving focus/caret in whichever field
+    // the user is actively typing in.
+    var body = document.getElementById('calc-parts-body');
+    if(!body || !calc.parts) return;
+    var active = document.activeElement;
+    calc.parts.forEach(function(part, pIdx){
+      if(!part.splitEnabled || !part.printerSplits) return;
+      part.printerSplits.forEach(function(leg, lIdx){
+        var tr = body.querySelector('tr.calc-partsplit-leg-row[data-part-idx="'+pIdx+'"][data-leg-idx="'+lIdx+'"]');
+        if(!tr) return;
+        var legUpp = Math.max(1, Number(leg.unitsPerPlate)||1);
+        var legQty = Math.max(0, Number(leg.quantity)||0);
+        var legPlates = legQty > 0 ? Math.ceil(legQty / legUpp) : 0;
+        var legFinishHours = legPlates * (Number(leg.printTimePerPlate)||0);
+        var qtyInput = tr.querySelector('.calc-partsplit-qty');
+        if(qtyInput && qtyInput !== active) qtyInput.value = String(legQty);
+        var platesCell = tr.querySelector('[data-partsplit-plates]');
+        if(platesCell) platesCell.textContent = String(legPlates);
+        var finishCell = tr.querySelector('[data-partsplit-finish]');
+        if(finishCell) finishCell.textContent = legFinishHours.toFixed(2);
+      });
     });
   }
   function updateCalcOutputs(){
@@ -2580,6 +2758,11 @@
     if(qtyEl) qtyEl.addEventListener('input', function(){
       calc.quantity = this.value;
       if(calc.splitEnabled) autoBalanceSplit();
+      if(calc.calcType === 'parts' && calc.parts){
+        // The order quantity changed, so every split part's own qty-needed (qty/unit × order
+        // quantity) changed too — rebalance each one's legs to match.
+        calc.parts.forEach(function(part){ if(part.splitEnabled) autoBalancePartSplit(part, partQtyNeededFor(part)); });
+      }
       updateCalcOutputs();
     });
     bindLight('calc-units-per-plate','unitsPerPlate');
@@ -2683,26 +2866,87 @@
     var partsBody = document.getElementById('calc-parts-body');
     if(partsBody){
       partsBody.addEventListener('input', function(e){
-        var tr = e.target.closest('tr'); if(!tr) return;
+        // A part-split leg's own fields (inside the nested table) — handled first and
+        // separately since these rows carry data-part-idx/data-leg-idx instead of the
+        // top-level row's data-idx.
+        var legRow = e.target.closest('tr.calc-partsplit-leg-row');
+        if(legRow){
+          var pIdx = Number(legRow.getAttribute('data-part-idx'));
+          var lIdx = Number(legRow.getAttribute('data-leg-idx'));
+          var splitPart = calc.parts[pIdx]; if(!splitPart) return;
+          var leg = (splitPart.printerSplits||[])[lIdx]; if(!leg) return;
+          if(e.target.classList.contains('calc-partsplit-qty')){
+            // Direct manual edit of this leg's own quantity — an intentional override, so it
+            // must persist as-is and must NOT trigger a rebalance.
+            leg.quantity = e.target.value;
+          } else if(e.target.classList.contains('calc-partsplit-upp')){
+            leg.unitsPerPlate = e.target.value;
+            autoBalancePartSplit(splitPart, partQtyNeededFor(splitPart));
+          } else if(e.target.classList.contains('calc-partsplit-time')){
+            leg.printTimePerPlate = e.target.value;
+            autoBalancePartSplit(splitPart, partQtyNeededFor(splitPart));
+          } else if(e.target.classList.contains('calc-partsplit-waste')){
+            leg.wasteGrams = e.target.value;
+          } else {
+            return;
+          }
+          updateCalcOutputs();
+          return;
+        }
+        var tr = e.target.closest('tr[data-idx]'); if(!tr) return;
         var idx = Number(tr.getAttribute('data-idx'));
         var part = calc.parts[idx]; if(!part) return;
         if(e.target.classList.contains('calc-part-name')) part.name = e.target.value;
-        else if(e.target.classList.contains('calc-part-qtyperunit')) part.qtyPerUnit = e.target.value;
+        else if(e.target.classList.contains('calc-part-qtyperunit')){
+          part.qtyPerUnit = e.target.value;
+          if(part.splitEnabled) autoBalancePartSplit(part, partQtyNeededFor(part));
+        }
         else if(e.target.classList.contains('calc-part-upp')) part.unitsPerPlate = e.target.value;
         else if(e.target.classList.contains('calc-part-time')) part.printTimePerPlate = e.target.value;
         else if(e.target.classList.contains('calc-part-waste')) part.wasteGrams = e.target.value;
         else return;
-        // A name edit doesn't affect plates/hours/filament cost math, but it IS the filament
-        // matrix's column header just below — updated directly here (not via a full render())
-        // because innerHTML-rebuilding the whole Calculator on every keystroke destroys and
-        // recreates this very input, which drops keyboard focus after each character typed.
+        // A name edit doesn't affect plates/hours/filament cost math, but it IS (one or more
+        // of) the filament matrix's column headers just below — updated directly here (not via
+        // a full render()) because innerHTML-rebuilding the whole Calculator on every keystroke
+        // destroys and recreates this very input, which drops keyboard focus after each
+        // character typed. A split part has one header per printer leg, so update all of them.
         if(e.target.classList.contains('calc-part-name')){
-          var headerEl = document.getElementById('calc-fil-part-header-'+idx);
-          if(headerEl) headerEl.textContent = (part.name || ('Part ' + (idx+1))) + ' (g/plate)';
+          var fallback = 'Part ' + (idx+1);
+          var headerEls = document.querySelectorAll('[data-fil-header-part-idx="'+idx+'"]');
+          Array.prototype.forEach.call(headerEls, function(h){
+            var suffix = h.getAttribute('data-fil-header-suffix') || ' (g/plate)';
+            h.textContent = (part.name || fallback) + suffix;
+          });
         }
         updateCalcOutputs();
       });
       partsBody.addEventListener('change', function(e){
+        if(e.target.classList.contains('calc-partsplit-printer')){
+          var legRow = e.target.closest('tr.calc-partsplit-leg-row');
+          var pIdx = Number(legRow.getAttribute('data-part-idx'));
+          var lIdx = Number(legRow.getAttribute('data-leg-idx'));
+          var splitPart = calc.parts[pIdx]; if(!splitPart) return;
+          var leg = (splitPart.printerSplits||[])[lIdx]; if(!leg) return;
+          leg.printerId = e.target.value;
+          var lp = printers.find(function(x){return x.id===leg.printerId;});
+          leg.wasteGrams = lp ? (Number(lp.defaultWasteGrams)||0) : leg.wasteGrams;
+          autoBalancePartSplit(splitPart, partQtyNeededFor(splitPart));
+          // Full re-render: the filament matrix's per-leg column header needs to pick up the
+          // new printer's name, not just the waste default and schedule.
+          render();
+          return;
+        }
+        if(e.target.classList.contains('calc-part-split-toggle')){
+          var tr2 = e.target.closest('tr[data-idx]'); var idx2 = Number(tr2.getAttribute('data-idx'));
+          var part2 = calc.parts[idx2]; if(!part2) return;
+          part2.splitEnabled = e.target.checked;
+          if(part2.splitEnabled){
+            if(!part2.printerSplits || !part2.printerSplits.length) part2.printerSplits = [blankPrinterSplitLeg()];
+            autoBalancePartSplit(part2, partQtyNeededFor(part2));
+          }
+          render();
+          return;
+        }
         if(!e.target.classList.contains('calc-part-printer')) return;
         var tr = e.target.closest('tr'); var idx = Number(tr.getAttribute('data-idx'));
         var part = calc.parts[idx]; if(!part) return;
@@ -2727,6 +2971,35 @@
         render();
       });
     });
+    document.querySelectorAll('.calc-partsplit-add').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var pIdx = Number(btn.getAttribute('data-part-idx'));
+        var part = calc.parts[pIdx]; if(!part) return;
+        if(!part.printerSplits) part.printerSplits = [];
+        part.printerSplits.push(blankPrinterSplitLeg());
+        autoBalancePartSplit(part, partQtyNeededFor(part));
+        render();
+      });
+    });
+    document.querySelectorAll('.calc-partsplit-balance').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var pIdx = Number(btn.getAttribute('data-part-idx'));
+        var part = calc.parts[pIdx]; if(!part) return;
+        autoBalancePartSplit(part, partQtyNeededFor(part));
+        render();
+      });
+    });
+    document.querySelectorAll('.calc-partsplit-remove').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var pIdx = Number(btn.getAttribute('data-part-idx'));
+        var lIdx = Number(btn.getAttribute('data-leg-idx'));
+        var part = calc.parts[pIdx]; if(!part) return;
+        part.printerSplits.splice(lIdx,1);
+        if(!part.printerSplits.length) part.printerSplits.push(blankPrinterSplitLeg());
+        autoBalancePartSplit(part, partQtyNeededFor(part));
+        render();
+      });
+    });
 
     var roundingSel = document.getElementById('calc-rounding');
     if(roundingSel) roundingSel.addEventListener('change', function(){ calc.rounding = this.value; render(); });
@@ -2740,13 +3013,20 @@
       var mid = e.target.getAttribute('data-material-id');
       var legIdxAttr = e.target.getAttribute('data-leg-idx');
       var partIdxAttr = e.target.getAttribute('data-part-idx');
-      if(legIdxAttr !== null){
-        // Split mode — this grams-per-unit value belongs to one specific printer leg.
-        var leg = calc.printerSplits[Number(legIdxAttr)]; if(!leg) return;
+      if(partIdxAttr !== null && legIdxAttr !== null){
+        // Parts mode, this part is split across printers — grams-per-plate for one specific
+        // leg (that leg's own printer).
+        var splitPart = calc.parts[Number(partIdxAttr)]; if(!splitPart) return;
+        var leg = (splitPart.printerSplits||[])[Number(legIdxAttr)]; if(!leg) return;
         if(!leg.filamentGrams) leg.filamentGrams = {};
         leg.filamentGrams[mid] = e.target.value;
+      } else if(legIdxAttr !== null){
+        // Split mode (whole job) — this grams-per-unit value belongs to one specific printer leg.
+        var leg2 = calc.printerSplits[Number(legIdxAttr)]; if(!leg2) return;
+        if(!leg2.filamentGrams) leg2.filamentGrams = {};
+        leg2.filamentGrams[mid] = e.target.value;
       } else if(partIdxAttr !== null){
-        // Parts mode — this grams-per-plate value belongs to one specific part.
+        // Parts mode — this grams-per-plate value belongs to one specific (non-split) part.
         var part = calc.parts[Number(partIdxAttr)]; if(!part) return;
         if(!part.filamentGrams) part.filamentGrams = {};
         part.filamentGrams[mid] = e.target.value;
@@ -2886,14 +3166,21 @@
   function spQuoteUsesPrinter(q, printerId){
     if(!printerId) return true;
     if(q.isSplit) return (q.legs||[]).some(function(l){ return l.printerId === printerId; });
-    if(q.isMultiPart) return (q.parts||[]).some(function(p){ return p.printerId === printerId; });
+    if(q.isMultiPart) return (q.parts||[]).some(function(p){
+      if(p.isSplit) return (p.legs||[]).some(function(l){ return l.printerId === printerId; });
+      return p.printerId === printerId;
+    });
     return q.printerId === printerId;
   }
   function spQuotePrinterLabel(q){
     if(q.isSplit) return (q.legs||[]).map(function(l){ return l.printerName; }).join(' + ') || 'Split';
     if(q.isMultiPart){
       var names = [];
-      (q.parts||[]).forEach(function(p){ if(p.printerName && names.indexOf(p.printerName) === -1) names.push(p.printerName); });
+      (q.parts||[]).forEach(function(p){
+        if(p.isSplit){
+          (p.legs||[]).forEach(function(l){ if(l.printerName && names.indexOf(l.printerName) === -1) names.push(l.printerName); });
+        } else if(p.printerName && names.indexOf(p.printerName) === -1) names.push(p.printerName);
+      });
       return names.join(' + ') || '—';
     }
     return q.printerSnapshot ? q.printerSnapshot.name : '—';
@@ -3109,6 +3396,13 @@
         html += '<tr><td>'+esc(p.name||'—')+'</td><td>'+esc(p.printerName||'—')+'</td><td class="num-cell">'+p.qtyPerUnit+'</td><td class="num-cell">'+p.plates+'</td>' +
           '<td class="num-cell">'+p.totalPrintHours.toFixed(2)+'</td><td class="num-cell">'+fmtMoney(p.filamentCost)+'</td>' +
           '<td class="num-cell">'+fmtMoney(p.electricityCost)+'</td><td class="num-cell">'+fmtMoney(p.machineCost)+'</td></tr>';
+        if(p.isSplit && p.legs && p.legs.length){
+          p.legs.forEach(function(l){
+            html += '<tr style="color:var(--ink-faint);"><td></td><td style="padding-left:16px;">↳ '+esc(l.printerName)+'</td><td class="num-cell">'+l.quantity+'</td><td class="num-cell">'+l.plates+'</td>' +
+              '<td class="num-cell">'+l.totalPrintHours.toFixed(2)+'</td><td class="num-cell">'+fmtMoney(l.filamentCost)+'</td>' +
+              '<td class="num-cell">'+fmtMoney(l.electricityCost)+'</td><td class="num-cell">'+fmtMoney(l.machineCost)+'</td></tr>';
+          });
+        }
       });
       html += '</tbody></table></div>';
       html += '<p class="hint" style="margin-top:10px;">'+q.totalPrintHours.toFixed(2)+' total print hours across '+q.parts.length+' parts (turnaround ≈ '+(Number(q.turnaroundHours)||0).toFixed(2)+' h since parts on different printers run in parallel) · '+q.plates+' plates total · Saved '+fmtDate(q.createdAt ? q.createdAt.slice(0,10) : q.quoteDate)+'</p>';
