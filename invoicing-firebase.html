@@ -174,13 +174,14 @@
     padding:14px 24px;
   }
   .brand{ display:flex; align-items:baseline; gap:8px; flex:0 0 auto; }
-  .brand-mark{ font-family:'Archivo'; font-weight:700; font-size:17px; letter-spacing:-0.02em; }
+  .brand-mark{ font-family:'Archivo'; font-weight:700; font-size:17px; letter-spacing:-0.02em; color:inherit; text-decoration:none; cursor:pointer; }
   .brand-sub{ font-size:11.5px; color:var(--ink-faint); font-family:'IBM Plex Mono'; }
   nav.tabs{ display:flex; gap:2px; flex-wrap:wrap; }
   .tab{
+    display:inline-flex; align-items:center;
     font-size:13.5px; font-weight:600; color:var(--ink-soft);
     padding:8px 13px; border-radius:100px; cursor:pointer; border:1px solid transparent;
-    background:transparent;
+    background:transparent; text-decoration:none;
     transition:background .12s ease, color .12s ease;
   }
   .tab:hover{ background:var(--paper-sunken); color:var(--ink); }
@@ -359,7 +360,7 @@
 <div id="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <span class="brand-mark" data-nav="dashboard" style="cursor:pointer;">Charl</span>
+      <a class="brand-mark" data-nav="dashboard" href="#dashboard">Charl</a>
       <span class="brand-sub" id="sync-indicator"></span>
     </div>
     <nav class="tabs" id="tabs"></nav>
@@ -1531,6 +1532,7 @@
         seedInitialConsumablesIfEmpty().catch(function(e){ console.error(e); })
       ]).then(function(){
         setupSubscriptions();
+        applyInitialHashIfValid();
         render();
       });
     } else {
@@ -1556,7 +1558,12 @@
   function chooseWorkspace(ws){
     workspace = ws;
     try{ localStorage.setItem('sp_invoicing_workspace', ws); }catch(e){}
-    go('dashboard');
+    // Honour a tab's hash if one was already in the address bar (e.g. this browser had never
+    // picked a workspace before, and the link opened was to a specific tab) — otherwise the
+    // usual default.
+    var hashName = location.hash.replace(/^#/, '');
+    var TABS = tabsForWorkspace(ws);
+    go((hashName && TABS.some(function(t){ return t.name === hashName; })) ? hashName : 'dashboard');
   }
   function switchWorkspace(){
     workspace = null;
@@ -1585,6 +1592,7 @@
         if(params && params.clientId) reportDraft.clientId = params.clientId;
       }
     }
+    syncHashForView(name, params);
     window.scrollTo(0,0);
     render();
   }
@@ -1758,6 +1766,48 @@
     {name:'settings', label:'Settings'}
   ];
 
+  /* ---------------- top-nav deep links (#hash) ----------------
+     Only the plain top-nav tabs (Dashboard, Calculator, Quotes, ...) get a real address —
+     they need no id or other state to redraw, so a URL fully describes them. This is what
+     lets those tabs be real <a href="#name"> links: a middle-click / Ctrl+click opens
+     "this page, but landed on that tab" in a new tab, and the browser's own back/forward
+     moves between them too. Row-level views (a specific quote, invoice, etc.) aren't part of
+     this — they still navigate purely in JS, same as before. */
+  var TAB_HASH_NAMES = TABS_SP.concat(TABS_CE).map(function(t){ return t.name; })
+    .filter(function(name, i, arr){ return arr.indexOf(name) === i; });
+  var initialHashApplied = false;
+  function tabsForWorkspace(ws){ return ws === 'sp' ? TABS_SP : TABS_CE; }
+  // Called from go() after `view` is already updated — mirrors the current plain-tab view
+  // into location.hash (no-op if it already matches, so this never fights the listener below).
+  function syncHashForView(name, params){
+    var isPlainTabNav = !params || !Object.keys(params).length;
+    if(!isPlainTabNav || TAB_HASH_NAMES.indexOf(name) === -1) return;
+    var newHash = '#' + name;
+    if(location.hash !== newHash) location.hash = newHash;
+  }
+  // Runs once, right after sign-in resolves workspace — if the page was opened with a tab's
+  // hash already in the address bar (a link someone middle-clicked, a bookmark, a reload),
+  // land there instead of always defaulting to Dashboard.
+  function applyInitialHashIfValid(){
+    if(initialHashApplied) return;
+    initialHashApplied = true;
+    if(!workspace) return;
+    var name = location.hash.replace(/^#/, '');
+    if(!name || name === view.name) return;
+    if(tabsForWorkspace(workspace).some(function(t){ return t.name === name; })){
+      view = { name: name, params: {} };
+    }
+  }
+  // Keeps the app in sync when the hash changes from OUTSIDE a go() call — the browser's own
+  // back/forward buttons, or the user editing the address bar by hand.
+  window.addEventListener('hashchange', function(){
+    if(connectState !== 'signed-in' || !workspace) return;
+    var name = location.hash.replace(/^#/, '');
+    if(!name || name === view.name) return;
+    if(!tabsForWorkspace(workspace).some(function(t){ return t.name === name; })) return;
+    go(name);
+  });
+
   function render(){
     renderTabs();
     var el = document.getElementById('view');
@@ -1808,7 +1858,7 @@
     t.innerHTML = !showTabs ? '' : TABS.map(function(tb){
       var viewDocTab = workspace==='sp' ? 'spinvoices' : 'documents';
       var active = (view.name === tb.name) || (view.name==='newDoc' && tb.name==='documents') || (view.name==='viewDoc' && tb.name===viewDocTab) || (view.name==='reportBuilder' && tb.name==='reports') || (view.name==='spQuoteView' && tb.name==='spquotes');
-      return '<button class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '">' + tb.label + '</button>';
+      return '<a class="tab' + (active?' active':'') + '" data-nav="' + tb.name + '" href="#' + tb.name + '">' + tb.label + '</a>';
     }).join('');
 
     var ind = document.getElementById('sync-indicator');
@@ -4732,6 +4782,12 @@
 
     var navEl = e.target.closest('[data-nav]');
     if(navEl){
+      // The top-nav tabs (and the "Charl" brand mark) are real <a href="#..."> links so
+      // middle-click / Ctrl/Cmd+click opens them in a new tab like any other link — for a
+      // modified click on one of those, do nothing here and let the browser handle it
+      // natively instead of ALSO navigating in this tab.
+      if(navEl.tagName === 'A' && (e.ctrlKey || e.metaKey || e.shiftKey || (e.button && e.button !== 0))) return;
+      if(navEl.tagName === 'A') e.preventDefault();
       var name = navEl.getAttribute('data-nav');
       var params = {};
       if(navEl.hasAttribute('data-kind')) params.kind = navEl.getAttribute('data-kind');
