@@ -1720,6 +1720,28 @@
   function saveBusiness(data){ if(dbNS) dbNS.doc('settings/business').set(data); }
   function saveSpSettings(data){ if(dbNS) dbNS.doc('settings/solidPrints').set(data); }
 
+  // Lets the user jump a numbering sequence forward (or back) to line up with where they left
+  // off in a previous invoicing system, instead of always starting fresh at 1. `n` is the NEXT
+  // number that will be assigned to a new document — mirrors what bumpCounter()/
+  // bumpSpQuoteCounter() write, so the normal "assign then bump" flow keeps working unchanged.
+  function saveCounter(kind, n){
+    n = Math.max(1, Math.round(Number(n)) || 1);
+    counters[kind] = n;
+    if(dbNS) dbNS.doc('counters/' + kind).set({ next: n });
+    return n;
+  }
+  // Highest number already used by a saved document/quote in a given series, so we can warn
+  // before the user accidentally sets "next number" low enough to collide with one already
+  // issued (parses the trailing digits off e.g. "INV-0042" / "Q-0007").
+  function highestIssuedNumber(numbers){
+    var max = 0;
+    (numbers||[]).forEach(function(s){
+      var m = /(\d+)\s*$/.exec(s || '');
+      if(m) max = Math.max(max, parseInt(m[1], 10));
+    });
+    return max;
+  }
+
   /* ---------------- printers / materials / consumables ---------------- */
   function savePrinter(data, editingId){
     if(!dbNS) return;
@@ -3840,6 +3862,17 @@
 
     html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save settings</button></div>';
     html += '</form></div>';
+
+    html += '<div class="card card-pad" style="margin-top:20px;">';
+    html += '<form id="numbering-form">';
+    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">Document numbering</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Set the next number to use — handy when switching over from another invoicing system and you want to carry on the same sequence instead of starting back at 1. Invoice numbers are shared with Solid Prints, since both businesses draw from one invoice sequence.</p>';
+    html += fieldRow([
+      numField('nextInvoiceNumber', 'Next invoice number (INV-####)', counters.invoice, 'E.g. if your last invoice elsewhere was INV-0089, set this to 90.'),
+      numField('nextQuoteNumber', 'Next quote number (QUO-####)', counters.quote, 'E.g. if your last quote elsewhere was QUO-0012, set this to 13.')
+    ]);
+    html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save numbering</button></div>';
+    html += '</form></div>';
     return html;
   }
   function renderSettingsSp(){
@@ -3871,7 +3904,15 @@
     html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save Solid Prints settings</button></div>';
     html += '</form></div>';
 
-    html += '<p class="hint" style="margin-top:14px;">Business &amp; banking details shown on the printed quote sheet are shared with Charl Engelbrecht, since you own both — edit them from the Charl Engelbrecht side (use the switch-business button in the top bar) → Settings.</p>';
+    html += '<div class="card card-pad" style="margin-top:20px;">';
+    html += '<form id="sp-numbering-form">';
+    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">Quote numbering</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Set the next quote number — handy when switching over from another system and you want to carry on the same sequence instead of starting back at 1.</p>';
+    html += numField('nextSpQuoteNumber', 'Next Solid Prints quote number (Q-####)', counters.spquote, 'E.g. if your last quote elsewhere was Q-0034, set this to 35.');
+    html += '<div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Save numbering</button></div>';
+    html += '</form></div>';
+
+    html += '<p class="hint" style="margin-top:14px;">Business &amp; banking details, and invoice numbering, are shared with Charl Engelbrecht, since you own both — edit them from the Charl Engelbrecht side (use the switch-business button in the top bar) → Settings.</p>';
     return html;
   }
   function field(name,label,value,type){
@@ -3881,6 +3922,10 @@
     return '<div class="field"><label>'+label+'</label><input name="'+name+'" type="'+type+'" value="'+esc(value)+'"></div>';
   }
   function fieldRow(fields){ return '<div class="field-row">'+fields.join('')+'</div>'; }
+  function numField(name, label, value, hint){
+    var h = hint ? '<div class="hint" style="margin-top:4px;">'+esc(hint)+'</div>' : '';
+    return '<div class="field"><label>'+label+'</label><input name="'+name+'" type="number" min="1" step="1" value="'+esc(value)+'">'+h+'</div>';
+  }
 
   /* ---------- editor ---------- */
   function renderEditor(){
@@ -4922,6 +4967,30 @@
       };
       saveSpSettings(pdata);
       alertBanner('Solid Prints settings saved.');
+    }
+    if(e.target.id === 'numbering-form'){
+      e.preventDefault();
+      var nfd = new FormData(e.target);
+      var nextInv = Math.max(1, Math.round(Number(nfd.get('nextInvoiceNumber')) || counters.invoice));
+      var nextQuo = Math.max(1, Math.round(Number(nfd.get('nextQuoteNumber')) || counters.quote));
+      var highestInv = highestIssuedNumber(docs.filter(function(d){ return d.kind === 'invoice'; }).map(function(d){ return d.number; }));
+      var highestQuo = highestIssuedNumber(docs.filter(function(d){ return d.kind === 'quote'; }).map(function(d){ return d.number; }));
+      var warn = [];
+      if(highestInv && nextInv <= highestInv) warn.push('an invoice numbered INV-' + pad4(highestInv) + ' already exists');
+      if(highestQuo && nextQuo <= highestQuo) warn.push('a quote numbered QUO-' + pad4(highestQuo) + ' already exists');
+      if(warn.length && !confirm('Heads up: ' + warn.join(' and ') + '. Saving these numbers could create a duplicate. Save anyway?')) return;
+      saveCounter('invoice', nextInv);
+      saveCounter('quote', nextQuo);
+      alertBanner('Document numbering saved.');
+    }
+    if(e.target.id === 'sp-numbering-form'){
+      e.preventDefault();
+      var sfd = new FormData(e.target);
+      var nextSpQ = Math.max(1, Math.round(Number(sfd.get('nextSpQuoteNumber')) || counters.spquote));
+      var highestSpQ = highestIssuedNumber(spQuotes.map(function(q){ return q.quoteNumber; }));
+      if(highestSpQ && nextSpQ <= highestSpQ && !confirm('Heads up: a quote numbered Q-' + pad4(highestSpQ) + ' already exists. Saving this number could create a duplicate. Save anyway?')) return;
+      saveCounter('spquote', nextSpQ);
+      alertBanner('Quote numbering saved.');
     }
   });
 
