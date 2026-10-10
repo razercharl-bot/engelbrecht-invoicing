@@ -271,6 +271,7 @@
     box-shadow:0 8px 30px -6px rgba(0,0,0,0.4);
   }
   .sheet-head{ display:flex; justify-content:space-between; gap:20px; align-items:flex-start; padding-bottom:22px; border-bottom:2px solid #181c1a; }
+  .sheet-logo{ display:block; max-height:52px; max-width:220px; width:auto; height:auto; margin-bottom:10px; }
   .sheet-brand{ font-family:'Archivo'; font-weight:700; font-size:19px; }
   .sheet-meta-line{ font-size:12.5px; color:#4b544e; margin-top:2px; }
   .sheet-doctitle{ text-align:right; }
@@ -511,7 +512,8 @@
       defaultWasteGrams: 0,
       defaultPackaging: 0,
       defaultLabourOn: false,
-      minimumMarginPct: 40
+      minimumMarginPct: 40,
+      logoDataUrl: null  // data: URL of the uploaded Solid Prints logo, shown on quotes/invoices
     };
   }
   function blankCalc(){
@@ -1582,6 +1584,10 @@
         draft = blankDraft(params && params.kind || 'invoice');
         if(params && params.prefillItem) draft.items = [params.prefillItem];
         if(params && params.clientId) draft.clientId = params.clientId;
+        // A brand-new invoice started from the Solid Prints side (its own "+ New invoice"
+        // button, not a conversion from a Calculator quote) still belongs on the Solid
+        // Prints Invoices tab.
+        if(workspace === 'sp' && draft.kind === 'invoice') draft.spInvoice = true;
       }
     }
     if(name === 'reportBuilder'){
@@ -1615,6 +1621,10 @@
       convertedToInvoice: null,
       fromQuote: null,
       fromSpQuote: false,
+      // Set true (in go(), below) when this invoice is typed directly on the Solid Prints
+      // side rather than converted from a Calculator quote — lets it show up in the Solid
+      // Prints Invoices tab without pretending it came from a quote (fromSpQuote stays for that).
+      spInvoice: false,
       filamentLines: [],
       totalFilamentRawG: 0,
       totalFilamentCostedG: 0
@@ -1719,6 +1729,77 @@
   /* ---------------- settings ---------------- */
   function saveBusiness(data){ if(dbNS) dbNS.doc('settings/business').set(data); }
   function saveSpSettings(data){ if(dbNS) dbNS.doc('settings/solidPrints').set(data); }
+  // Updates just the logo, folding it into the rest of the current Solid Prints settings so
+  // saveSpSettings' full-document write (it has no merge option) never clobbers the costing
+  // settings saved from the separate form below it.
+  function saveSpLogo(dataUrl){
+    spSettings = Object.assign({}, spSettings, { logoDataUrl: dataUrl || null });
+    saveSpSettings(spSettings);
+  }
+
+  // Reads an uploaded logo image, shrinks it to a sensible size and re-encodes it, then hands
+  // back a data: URL via callback(errorMessageOrNull, dataUrl). Everything is stored inline in
+  // the Firestore settings document (there's no file storage in this app), so this keeps the
+  // result small and comfortably under Firestore's 1MB-per-document limit.
+  var LOGO_MAX_DIMENSION = 480;
+  var LOGO_MAX_DATAURL_CHARS = 350 * 1024; // ~260KB of actual image data once base64-decoded
+  function processLogoFile(file, callback){
+    if(!file) return;
+    if(!/^image\/(png|jpe?g|webp)$/i.test(file.type)){
+      callback('Please choose a PNG, JPG or WEBP image.');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onerror = function(){ callback('Could not read that file — try again.'); };
+    reader.onload = function(){
+      var img = new Image();
+      img.onerror = function(){ callback('That doesn\'t look like a valid image file.'); };
+      img.onload = function(){
+        var scale = Math.min(1, LOGO_MAX_DIMENSION / Math.max(img.width, img.height));
+        var w = Math.max(1, Math.round(img.width * scale));
+        var h = Math.max(1, Math.round(img.height * scale));
+        var canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        var ctx = canvas.getContext('2d');
+        // PNG/WEBP keep transparency; anything else gets flattened onto white first since a
+        // JPEG re-encode has no alpha channel (transparent areas would otherwise go black).
+        var keepAlpha = file.type === 'image/png' || file.type === 'image/webp';
+        if(!keepAlpha){ ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); }
+        ctx.drawImage(img, 0, 0, w, h);
+        var dataUrl = keepAlpha ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.9);
+        if(dataUrl.length > LOGO_MAX_DATAURL_CHARS && keepAlpha){
+          // A busy PNG can still be large even shrunk — fall back to JPEG to shrink it further.
+          dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        } else if(dataUrl.length > LOGO_MAX_DATAURL_CHARS){
+          dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+        }
+        if(dataUrl.length > LOGO_MAX_DATAURL_CHARS){
+          callback('That image is still too large after shrinking it — try a simpler or smaller file.');
+          return;
+        }
+        callback(null, dataUrl);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+  function wireSpSettingsEvents(){
+    var logoInput = document.getElementById('sp-logo-input');
+    if(logoInput) logoInput.addEventListener('change', function(){
+      var file = this.files && this.files[0];
+      if(!file) return;
+      processLogoFile(file, function(err, dataUrl){
+        if(err){ alertBanner(err); return; }
+        saveSpLogo(dataUrl);
+        alertBanner('Logo uploaded.');
+      });
+    });
+    var logoRemove = document.getElementById('sp-logo-remove');
+    if(logoRemove) logoRemove.addEventListener('click', function(){
+      saveSpLogo(null);
+      alertBanner('Logo removed.');
+    });
+  }
 
   // Lets the user jump a numbering sequence forward (or back) to line up with where they left
   // off in a previous invoicing system, instead of always starting fresh at 1. `n` is the NEXT
@@ -1871,6 +1952,7 @@
     if(view.name === 'spquotes') wireSpQuotesEvents();
     if(view.name === 'spQuoteView') wireSpQuoteViewEvents();
     if(view.name === 'worksheet') wireWorkSheetEvents();
+    if(view.name === 'settings' && workspace === 'sp') wireSpSettingsEvents();
   }
 
   function renderTabs(){
@@ -3528,7 +3610,9 @@
 
     html += '<div class="sheet-wrap"><div class="sheet">';
     html += '<div class="sheet-head">';
-    html += '<div><div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
+    html += '<div>';
+    if(spSettings.logoDataUrl) html += '<img class="sheet-logo" src="'+esc(spSettings.logoDataUrl)+'" alt="">';
+    html += '<div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
     if(business.address) html += '<div class="sheet-meta-line">'+esc(business.address).replace(/\n/g,'<br>')+'</div>';
     if(business.email) html += '<div class="sheet-meta-line">'+esc(business.email)+(business.phone?' · '+esc(business.phone):'')+'</div>';
     if(business.regNumber) html += '<div class="sheet-meta-line">Reg / VAT: '+esc(business.regNumber)+'</div>';
@@ -3757,16 +3841,18 @@
      Solid Prints — general Charl Engelbrecht invoices stay out of this list. Reuses the
      existing document viewer (renderDocView) rather than building a second one. */
   function spInvoices(){
-    return docs.filter(function(d){ return d.kind==='invoice' && !!d.fromSpQuote; })
+    return docs.filter(function(d){ return d.kind==='invoice' && (!!d.fromSpQuote || !!d.spInvoice); })
       .sort(function(a,b){ return (b.dateIssued||'') < (a.dateIssued||'') ? -1 : 1; });
   }
   function renderSpInvoices(){
     var list = spInvoices();
-    var html = '<div class="view-head"><div><h1>Invoices</h1><div class="view-sub">Invoices created from Solid Prints quotes</div></div></div>';
+    var html = '<div class="view-head"><div><h1>Invoices</h1><div class="view-sub">Invoices from Solid Prints quotes, or typed up directly</div></div>' +
+      '<div class="actions-row"><button class="btn btn-primary" data-nav="newDoc" data-kind="invoice">+ New invoice</button></div></div>';
     html += '<div class="card">';
     if(!list.length){
-      html += emptyState('📄', 'No invoices yet', 'Set a quote\'s billing status to Invoiced — or use "Create invoice from this" in the Calculator — to see it here.', [
-        {label:'View quotes', nav:'spquotes', primary:true}
+      html += emptyState('📄', 'No invoices yet', 'Write one up directly, set a quote\'s billing status to Invoiced, or use "Create invoice from this" in the Calculator.', [
+        {label:'+ New invoice', nav:'newDoc', kind:'invoice', primary:true},
+        {label:'View quotes', nav:'spquotes'}
       ]);
     } else {
       html += '<div class="table-wrap"><table><thead><tr><th>Number</th><th>Client</th><th>From quote</th><th>Date</th><th>Status</th><th style="text-align:right;">Total</th></tr></thead><tbody>';
@@ -3880,6 +3966,21 @@
 
     html += renderAccountSettingsCard();
 
+    html += '<div class="card card-pad" style="margin-bottom:20px;">';
+    html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">Branding</h3>';
+    html += '<p class="hint" style="margin-bottom:14px;">Upload your Solid Prints logo and it\'ll appear on your quotes and invoices.</p>';
+    html += '<div style="display:flex; align-items:center; gap:18px; flex-wrap:wrap;">';
+    html += '<div style="width:96px; height:96px; border-radius:var(--radius-md); border:1px solid var(--line); background:var(--paper-sunken); display:flex; align-items:center; justify-content:center; overflow:hidden; flex-shrink:0;">';
+    html += spSettings.logoDataUrl
+      ? '<img src="'+esc(spSettings.logoDataUrl)+'" alt="Solid Prints logo" style="max-width:100%; max-height:100%; object-fit:contain;">'
+      : '<span style="font-size:11px; color:var(--ink-faint); text-align:center; padding:0 8px;">No logo yet</span>';
+    html += '</div>';
+    html += '<div>';
+    html += '<input type="file" id="sp-logo-input" accept="image/png,image/jpeg,image/webp" style="display:block; margin-bottom:8px;">';
+    html += '<div class="hint" style="margin-bottom:10px;">PNG, JPG or WEBP. Resized automatically — a simple, square-ish logo works best.</div>';
+    if(spSettings.logoDataUrl) html += '<button type="button" class="btn btn-sm btn-ghost btn-danger" id="sp-logo-remove">Remove logo</button>';
+    html += '</div></div></div>';
+
     html += '<div class="card card-pad">';
     html += '<form id="solidprints-form">';
     html += '<h3 style="font-size:14px; margin-bottom:6px; color:var(--ink-soft);">Costing settings</h3>';
@@ -3932,13 +4033,19 @@
     var d = draft;
     var t = draftTotals();
     var kindLabel = d.kind==='invoice' ? 'Invoice' : 'Quote';
+    // A document opened from the Solid Prints side (its own "+ New invoice" button) should
+    // cancel/save back to the Solid Prints Invoices tab, not the Charl Engelbrecht Documents
+    // tab — that tab isn't even reachable from the Solid Prints top nav.
+    var cancelTarget = workspace === 'sp' ? 'spinvoices' : 'documents';
     var html = '<div class="view-head"><div><h1>' + (d.id?'Edit ':'New ') + kindLabel + '</h1>' +
       '<div class="view-sub">' + (d.number ? d.number : 'Number assigned on save') + '</div></div>' +
-      '<div class="actions-row"><button class="btn" data-nav="documents">Cancel</button><button class="btn btn-primary" id="save-doc-btn">Save document</button></div></div>';
+      '<div class="actions-row"><button class="btn" data-nav="' + cancelTarget + '">Cancel</button><button class="btn btn-primary" id="save-doc-btn">Save document</button></div></div>';
 
     html += '<div class="card card-pad">';
 
-    if(!d.id){
+    // Solid Prints only has one kind of document typed up directly here (invoices — quotes
+    // go through the Calculator), so there's nothing to switch between on that side.
+    if(!d.id && workspace !== 'sp'){
       html += '<div class="field" style="max-width:260px;"><label>Document type</label><select id="f-kind">' +
         '<option value="invoice"'+(d.kind==='invoice'?' selected':'')+'>Invoice</option>' +
         '<option value="quote"'+(d.kind==='quote'?' selected':'')+'>Quote</option>' +
@@ -4042,7 +4149,7 @@
     var t = docTotals(d);
     var c = d.clientSnapshot || {};
 
-    var backTarget = (workspace==='sp' && d.kind==='invoice' && d.fromSpQuote) ? 'spinvoices' : 'documents';
+    var backTarget = (workspace==='sp' && d.kind==='invoice' && (d.fromSpQuote || d.spInvoice)) ? 'spinvoices' : 'documents';
     var html = '<div class="doc-toolbar no-print">';
     html += '<div class="actions-row">';
     html += '<button class="btn" data-nav="' + backTarget + '">← Back</button>';
@@ -4063,9 +4170,14 @@
     if(d.convertedToInvoice) html += '<div class="banner no-print">This quote was converted to invoice <strong>&nbsp;'+esc(d.convertedToInvoice)+'</strong>.</div>';
     if(d.fromQuote) html += '<div class="banner no-print">Created from quote <strong>&nbsp;'+esc(d.fromQuote)+'</strong>.</div>';
 
+    // Only show the Solid Prints logo on documents that actually belong to Solid Prints —
+    // a plain Charl Engelbrecht invoice/quote shouldn't carry the other business's branding.
+    var isSpDoc = d.kind==='invoice' && (!!d.fromSpQuote || !!d.spInvoice);
     html += '<div class="sheet-wrap"><div class="sheet">';
     html += '<div class="sheet-head">';
-    html += '<div><div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
+    html += '<div>';
+    if(isSpDoc && spSettings.logoDataUrl) html += '<img class="sheet-logo" src="'+esc(spSettings.logoDataUrl)+'" alt="">';
+    html += '<div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
     if(business.address) html += '<div class="sheet-meta-line">'+esc(business.address).replace(/\n/g,'<br>')+'</div>';
     if(business.email) html += '<div class="sheet-meta-line">'+esc(business.email)+(business.phone?' · '+esc(business.phone):'')+'</div>';
     if(business.regNumber) html += '<div class="sheet-meta-line">Reg / VAT: '+esc(business.regNumber)+'</div>';
