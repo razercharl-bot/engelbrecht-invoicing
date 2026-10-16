@@ -4218,13 +4218,22 @@
       doc.text(fmtMoney(amount), colAmtRightX, y, { align:'right' });
       y += rowH;
       doc.setDrawColor(PDF_BORDER); doc.setLineWidth(0.3);
-      doc.line(PDF_MARGIN, y - 2.5, tableRightEdge, y - 2.5);
+      // Centred in the gap between this row's text and the next row's (rowH leaves 8.6mm of
+      // clearance below the baseline; 4.3 splits that evenly instead of sitting almost on
+      // top of the following row, which is what made these look off-centre before).
+      doc.line(PDF_MARGIN, y - 4.3, tableRightEdge, y - 4.3);
     });
     y += 4;
 
+    // Reserved so the "Thank you" footer never ends up stranded alone on a fresh page: the
+    // last block before it (notes, or totals when there are no notes) checks for this much
+    // extra room too, so that block — and the footer right after it — move to the next page
+    // together instead of leaving a near-empty page behind with just one line on it.
+    var footerBlockH = model.footerThanks ? 14 : 0;
+
     // ---- totals ----
     var totalsRows = model.totalsRows || [];
-    ensureSpace(totalsRows.length * 6.5 + 4);
+    ensureSpace(totalsRows.length * 6.5 + 4 + (model.notes ? 0 : footerBlockH));
     totalsRows.forEach(function(row){
       y += 6.5;
       doc.setFont('helvetica', row.bold ? 'bold' : 'normal');
@@ -4245,7 +4254,7 @@
     if(model.notes){
       var noteLines = doc.splitTextToSize(model.notes, PDF_CONTENT_W - 10);
       var noteH = noteLines.length * 4.3 + 8;
-      ensureSpace(noteH + 4);
+      ensureSpace(noteH + 4 + footerBlockH);
       doc.setFillColor(PDF_NOTES_BG);
       doc.roundedRect(PDF_MARGIN, y, PDF_CONTENT_W, noteH, 1.5, 1.5, 'F');
       doc.setFont('helvetica','normal'); doc.setFontSize(9); setColor(PDF_NOTES_INK);
