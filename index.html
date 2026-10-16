@@ -287,8 +287,13 @@
   .sheet .totals-row{ font-size:13.5px; }
   .sheet .totals-row.total{ border-top:2px solid #181c1a; }
   .sheet-notes{ margin-top:26px; font-size:12.5px; color:#39413c; background:#f4f6f3; border-radius:6px; padding:12px 14px; white-space:pre-wrap; }
-  .sheet-pay{ margin-top:18px; font-size:12.5px; color:#39413c; }
-  .sheet-pay .label{ font-size:10.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#8a9189; margin-bottom:5px; }
+  /* Payment details now sit at the top of the sheet, centred, right under the header — not
+     buried at the bottom where a client could miss them (or, before the page-break fix, where
+     the block could get sliced in half across a page boundary). */
+  .sheet-pay{ margin:20px 0 28px; padding:12px 16px; background:#f4f6f3; border-radius:6px; text-align:center; font-size:12.5px; color:#39413c; }
+  .sheet-pay .label{ font-size:9.5px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#8a9189; margin-bottom:5px; }
+  .sheet-pay .pay-line{ margin-top:2px; }
+  .sheet-pay .pay-line.primary{ font-weight:700; color:#181c1a; }
   .sheet-foot{ margin-top:34px; padding-top:14px; border-top:1px solid #dfe3de; font-size:11.5px; color:#8a9189; text-align:center; }
   /* Keep these blocks (and every line-item row) from being sliced in half across a page
      boundary when the sheet is exported to PDF or printed — a banking-details or line-item
@@ -367,6 +372,11 @@
 <script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.14.0/html2pdf.bundle.min.js"></script>
+<!-- jsPDF on its own (same version html2pdf.js 0.14.0 bundles internally, just not exposed) —
+     used to draw invoice/quote PDFs directly as real vector text instead of a raster screenshot,
+     so they stay crisp at any zoom and the file stays small. html2pdf (above) still handles the
+     monthly client report PDF, which is unchanged. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js"></script>
 <div id="topbar">
   <div class="topbar-inner">
     <div class="brand">
@@ -473,6 +483,24 @@
   function uid(){ return Math.random().toString(36).slice(2,10); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function pad4(n){ n = Math.max(1, n|0); return String(n).padStart(4,'0'); }
+  // Shared by both sheet templates (the generic Charl Engelbrecht document view and the Solid
+  // Prints quote view) — the centred payment-details block near the top of the sheet, right
+  // under the header. Returns '' when there's nothing to show yet (no bank details saved).
+  function renderSheetPaymentBlock(){
+    if(!(business.bankName || business.accountNumber)) return '';
+    var line1 = [business.bankName ? esc(business.bankName) : '', business.accountHolder ? 'Account holder: '+esc(business.accountHolder) : '']
+      .filter(Boolean).join(' — ');
+    var line2 = [
+      business.accountNumber ? 'Account number: '+esc(business.accountNumber) : '',
+      business.branchCode ? 'Branch code: '+esc(business.branchCode) : '',
+      business.accountType ? esc(business.accountType) : ''
+    ].filter(Boolean).join('&nbsp;&nbsp;&middot;&nbsp;&nbsp;');
+    var html = '<div class="sheet-pay"><div class="label">Payment details</div>';
+    if(line1) html += '<div class="pay-line primary">'+line1+'</div>';
+    if(line2) html += '<div class="pay-line">'+line2+'</div>';
+    html += '</div>';
+    return html;
+  }
 
   /* ---------------- state ---------------- */
   var dbNS = null;          // resolved db capability namespace, or null
@@ -3709,6 +3737,8 @@
       '<div class="sheet-dates" style="margin-top:8px;">Issued '+fmtDate(q.quoteDate)+'<br>Valid until '+fmtDate(q.validUntil)+'</div></div>';
     html += '</div>';
 
+    html += renderSheetPaymentBlock();
+
     html += '<div class="sheet-parties"><div class="block"><div class="label">Quoted to</div>' +
       '<strong>'+esc(c.name||'—')+'</strong><br>' +
       (c.company? esc(c.company)+'<br>' : '') +
@@ -3726,16 +3756,6 @@
       '</div>';
 
     if(q.notes) html += '<div class="sheet-notes">'+esc(q.notes)+'</div>';
-
-    if(business.bankName || business.accountNumber){
-      html += '<div class="sheet-pay"><div class="label">Payment details</div>' +
-        (business.bankName? esc(business.bankName)+'<br>':'') +
-        (business.accountHolder? 'Account holder: '+esc(business.accountHolder)+'<br>':'') +
-        (business.accountNumber? 'Account number: '+esc(business.accountNumber)+'<br>':'') +
-        (business.branchCode? 'Branch code: '+esc(business.branchCode)+'<br>':'') +
-        (business.accountType? esc(business.accountType):'') +
-        '</div>';
-    }
 
     html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
     html += '</div></div>';
@@ -4030,33 +4050,247 @@
     return html;
   }
 
+  /* ---------------- vector PDF generation (invoices & quotes) ----------------
+     Earlier versions rasterized the whole .sheet element via html2canvas and placed that
+     single picture into the PDF — simple, but no amount of extra resolution ever made the
+     text fully crisp (it's a picture OF text, not text), and a tall document could only be
+     kept from splitting mid-row by telling html2canvas's pagebreak logic where NOT to cut.
+     Drawing directly with jsPDF instead produces real vector text: crisp at any zoom,
+     genuinely selectable/searchable, a file that's tens of KB instead of several MB, and
+     pagination that's simply correct — a block never starts unless it actually fits. */
+  var PDF_PAGE_W = 210, PDF_PAGE_H = 297; // A4 portrait, mm
+  var PDF_MARGIN = 16;
+  var PDF_CONTENT_W = PDF_PAGE_W - PDF_MARGIN * 2;
+  var PDF_INK = '#181c1a', PDF_SOFT = '#4b544e', PDF_FAINT = '#8a9189', PDF_BORDER = '#dfe3de',
+      PDF_NOTES_BG = '#f4f6f3', PDF_NOTES_INK = '#39413c', PDF_ACCENT = '#1b6e5c';
+
+  function getJsPDF(){ return (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || null; }
+
+  // Resolves a data: URL to its pixel dimensions (needed to place it at the right aspect
+  // ratio) without ever rejecting — a broken/missing logo just means no logo in the PDF,
+  // not a failed PDF.
+  function loadImageForPdf(dataUrl){
+    return new Promise(function(resolve){
+      if(!dataUrl){ resolve(null); return; }
+      var img = new Image();
+      img.onload = function(){ resolve({ dataUrl: dataUrl, w: img.naturalWidth||1, h: img.naturalHeight||1 }); };
+      img.onerror = function(){ resolve(null); };
+      img.src = dataUrl;
+    });
+  }
+
+  // Draws one invoice/quote onto a fresh jsPDF document and returns it. `model` normalizes
+  // the handful of differences between a Charl Engelbrecht document and a Solid Prints quote
+  // (party label, logo, whether a subtotal/VAT row applies) so this one function draws both.
+  // model: { kind, number, dateIssuedLabel, dateIssued, dateDueLabel, dateDue, business, logo,
+  //   partyLabel, party, items:[{description,qty,unitPrice}], totalsRows:[{label,value,bold}],
+  //   notes, payment (business object or null), footerThanks }
+  function buildSheetPdf(model){
+    var JsPDFCtor = getJsPDF();
+    var doc = new JsPDFCtor({ unit:'mm', format:'a4', orientation:'portrait' });
+    var y = PDF_MARGIN;
+    var pageBottom = PDF_PAGE_H - PDF_MARGIN;
+    var tableRightEdge = PDF_MARGIN + PDF_CONTENT_W;
+
+    function setColor(hex){ doc.setTextColor(hex); }
+    // The whole page-break fix, in one place: a block simply never starts unless this many
+    // more mm fit before the bottom margin — otherwise a fresh page starts first.
+    function ensureSpace(h){
+      if(y + h > pageBottom){ doc.addPage(); y = PDF_MARGIN; }
+    }
+
+    // ---- header: brand (+ logo) on the left, document kind/number/dates on the right ----
+    var leftX = PDF_MARGIN;
+    var lx = y;
+    if(model.logo){
+      var maxLogoH = 13, maxLogoW = 46;
+      var ratio = model.logo.w / model.logo.h;
+      var lh = maxLogoH, lw = lh * ratio;
+      if(lw > maxLogoW){ lw = maxLogoW; lh = lw / ratio; }
+      doc.addImage(model.logo.dataUrl, leftX, lx, lw, lh);
+      lx += lh + 3;
+    }
+    lx += 4.5;
+    doc.setFont('helvetica','bold'); doc.setFontSize(15); setColor(PDF_INK);
+    doc.text(model.business.legalName || 'Charl Engelbrecht', leftX, lx);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); setColor(PDF_SOFT);
+    (model.business.address||'').split('\n').filter(Boolean).forEach(function(line){ lx += 4.2; doc.text(line, leftX, lx); });
+    if(model.business.email){ lx += 4.2; doc.text(model.business.email + (model.business.phone?'  ·  '+model.business.phone:''), leftX, lx); }
+    if(model.business.regNumber){ lx += 4.2; doc.text('Reg / VAT: ' + model.business.regNumber, leftX, lx); }
+    var leftBottom = lx;
+
+    var rx = y;
+    rx += 4.5;
+    doc.setFont('helvetica','bold'); doc.setFontSize(15); setColor(PDF_INK);
+    doc.text(model.kind, tableRightEdge, rx, { align:'right' });
+    rx += 5;
+    doc.setFont('courier','normal'); doc.setFontSize(10); setColor(PDF_SOFT);
+    doc.text(model.number || '', tableRightEdge, rx, { align:'right' });
+    doc.setFont('helvetica','normal'); doc.setFontSize(9);
+    rx += 4.6;
+    doc.text(model.dateIssuedLabel + ' ' + fmtDate(model.dateIssued), tableRightEdge, rx, { align:'right' });
+    rx += 4.2;
+    doc.text(model.dateDueLabel + ' ' + fmtDate(model.dateDue), tableRightEdge, rx, { align:'right' });
+    var rightBottom = rx;
+
+    y = Math.max(leftBottom, rightBottom) + 6;
+    doc.setDrawColor(PDF_INK); doc.setLineWidth(0.5);
+    doc.line(PDF_MARGIN, y, tableRightEdge, y);
+    y += 7;
+
+    // ---- payment details — moved up here, front and centre, so a client can't miss them ----
+    if(model.payment){
+      var p = model.payment;
+      var payLines = [];
+      var line1 = [p.bankName, p.accountHolder ? 'Account holder: ' + p.accountHolder : ''].filter(Boolean).join('  —  ');
+      if(line1) payLines.push(line1);
+      var line2 = [
+        p.accountNumber ? 'Account number: ' + p.accountNumber : '',
+        p.branchCode ? 'Branch code: ' + p.branchCode : '',
+        p.accountType || ''
+      ].filter(Boolean).join('   ·   ');
+      if(line2) payLines.push(line2);
+      if(payLines.length){
+        var boxH = 7 + payLines.length * 4.6;
+        ensureSpace(boxH + 6);
+        doc.setFillColor(PDF_NOTES_BG);
+        doc.roundedRect(PDF_MARGIN, y, PDF_CONTENT_W, boxH, 1.5, 1.5, 'F');
+        var py = y + 5.5;
+        doc.setFont('helvetica','bold'); doc.setFontSize(7.5); setColor(PDF_FAINT);
+        doc.text('PAYMENT DETAILS', PDF_MARGIN + PDF_CONTENT_W/2, py, { align:'center' });
+        py += 5;
+        doc.setFontSize(9.5); setColor(PDF_NOTES_INK);
+        payLines.forEach(function(line, i){
+          doc.setFont('helvetica', i===0 ? 'bold' : 'normal');
+          doc.text(line, PDF_MARGIN + PDF_CONTENT_W/2, py, { align:'center' });
+          py += 4.6;
+        });
+        y += boxH + 8;
+      }
+    }
+
+    // ---- party block (Billed to / Quoted to) ----
+    ensureSpace(24);
+    doc.setFont('helvetica','bold'); doc.setFontSize(8); setColor(PDF_FAINT);
+    doc.text(model.partyLabel.toUpperCase(), PDF_MARGIN, y);
+    y += 5;
+    var c = model.party || {};
+    doc.setFontSize(10); setColor(PDF_INK);
+    doc.setFont('helvetica','bold');
+    doc.text(c.name || '—', PDF_MARGIN, y);
+    doc.setFont('helvetica','normal');
+    [c.company, c.address, [c.email, c.phone].filter(Boolean).join('  ·  ')].forEach(function(field){
+      if(!field) return;
+      String(field).split('\n').filter(Boolean).forEach(function(line){ y += 4.6; doc.text(line, PDF_MARGIN, y); });
+    });
+    y += 10;
+
+    // ---- line items table ----
+    var colAmtRightX = tableRightEdge;
+    var colPriceRightX = tableRightEdge - 38;
+    var colQtyRightX = tableRightEdge - 70;
+    var colDescX = PDF_MARGIN;
+    var colDescW = colQtyRightX - 8 - colDescX;
+
+    function drawTableHeader(){
+      ensureSpace(10);
+      doc.setFont('helvetica','bold'); doc.setFontSize(8.5); setColor(PDF_FAINT);
+      doc.text('DESCRIPTION', colDescX, y);
+      doc.text('QTY', colQtyRightX, y, { align:'right' });
+      doc.text('UNIT PRICE', colPriceRightX, y, { align:'right' });
+      doc.text('AMOUNT', colAmtRightX, y, { align:'right' });
+      y += 2.5;
+      doc.setDrawColor(PDF_INK); doc.setLineWidth(0.5);
+      doc.line(PDF_MARGIN, y, tableRightEdge, y);
+      y += 6;
+    }
+    drawTableHeader();
+    (model.items||[]).forEach(function(it){
+      var qty = Number(it.qty)||0, price = Number(it.unitPrice)||0, amount = qty*price;
+      var descLines = doc.splitTextToSize(it.description || '', colDescW);
+      if(!descLines.length) descLines = [''];
+      var rowH = descLines.length * 4.6 + 4;
+      ensureSpace(rowH + 2);
+      doc.setFont('helvetica','normal'); doc.setFontSize(9.5); setColor(PDF_INK);
+      descLines.forEach(function(line, i){ doc.text(line, colDescX, y + i*4.6); });
+      doc.text(String(qty), colQtyRightX, y, { align:'right' });
+      doc.text(fmtMoney(price), colPriceRightX, y, { align:'right' });
+      doc.text(fmtMoney(amount), colAmtRightX, y, { align:'right' });
+      y += rowH;
+      doc.setDrawColor(PDF_BORDER); doc.setLineWidth(0.3);
+      doc.line(PDF_MARGIN, y - 2.5, tableRightEdge, y - 2.5);
+    });
+    y += 4;
+
+    // ---- totals ----
+    var totalsRows = model.totalsRows || [];
+    ensureSpace(totalsRows.length * 6.5 + 4);
+    totalsRows.forEach(function(row){
+      y += 6.5;
+      doc.setFont('helvetica', row.bold ? 'bold' : 'normal');
+      doc.setFontSize(row.bold ? 12 : 9.5);
+      setColor(row.bold ? PDF_INK : PDF_SOFT);
+      doc.text(row.label, tableRightEdge - 42, y);
+      doc.setFont('courier','normal');
+      setColor(row.bold ? PDF_ACCENT : PDF_SOFT);
+      doc.text(fmtMoney(row.value), tableRightEdge, y, { align:'right' });
+      if(row.bold){
+        doc.setDrawColor(PDF_INK); doc.setLineWidth(0.4);
+        doc.line(tableRightEdge - 60, y - 5, tableRightEdge, y - 5);
+      }
+    });
+    y += 8;
+
+    // ---- notes ----
+    if(model.notes){
+      var noteLines = doc.splitTextToSize(model.notes, PDF_CONTENT_W - 10);
+      var noteH = noteLines.length * 4.3 + 8;
+      ensureSpace(noteH + 4);
+      doc.setFillColor(PDF_NOTES_BG);
+      doc.roundedRect(PDF_MARGIN, y, PDF_CONTENT_W, noteH, 1.5, 1.5, 'F');
+      doc.setFont('helvetica','normal'); doc.setFontSize(9); setColor(PDF_NOTES_INK);
+      var ny = y + 6;
+      noteLines.forEach(function(line){ doc.text(line, PDF_MARGIN + 5, ny); ny += 4.3; });
+      y += noteH + 8;
+    }
+
+    // ---- footer ----
+    if(model.footerThanks){
+      ensureSpace(14);
+      doc.setDrawColor(PDF_BORDER); doc.setLineWidth(0.3);
+      doc.line(PDF_MARGIN, y, tableRightEdge, y);
+      y += 7;
+      doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(PDF_FAINT);
+      doc.text('Thank you — ' + model.footerThanks, PDF_MARGIN + PDF_CONTENT_W/2, y, { align:'center' });
+    }
+
+    return doc;
+  }
+
   function downloadSpQuotePdf(q){
     if(quotePdfBusy) return;
-    var el = document.querySelector('.sheet');
-    if(!el) return;
-    if(!window.html2pdf){
+    if(!getJsPDF()){
       alertBanner('Could not load the PDF tool — printing instead.');
       window.print();
       return;
     }
     quotePdfBusy = q.id;
     render();
-    var opt = {
-      margin: 0,
-      filename: (q.quoteNumber || 'quote') + '.pdf',
-      // PNG instead of JPEG: lossless, so text stays crisp instead of getting slightly fuzzy
-      // from JPEG compression. scale 3 (up from 2) renders at a higher pixel density before
-      // it's placed on the page, for sharper text and the logo.
-      image: { type: 'png' },
-      html2canvas: { scale: 3, useCORS: true, backgroundColor: '#ffffff' },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      // Without this, a tall quote/invoice just gets sliced wherever the page boundary
-      // happens to fall — including straight through the middle of a line-item row or the
-      // banking details block. This keeps those together, pushing the whole block to the
-      // next page instead of cutting it in half.
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.totals', '.sheet-notes', '.sheet-pay', '.sheet-foot', '.sheet-parties'] }
-    };
-    window.html2pdf().set(opt).from(el).save().then(function(){
+    loadImageForPdf(spSettings.logoDataUrl).then(function(logo){
+      var model = {
+        kind: 'QUOTE', number: q.quoteNumber || 'quote',
+        dateIssuedLabel: 'Issued', dateIssued: q.quoteDate,
+        dateDueLabel: 'Valid until', dateDue: q.validUntil,
+        business: business, logo: logo,
+        partyLabel: 'Quoted to', party: q.clientSnapshot || {},
+        items: [{ description: q.jobName, qty: q.quantity, unitPrice: q.sellingPricePerUnit }],
+        totalsRows: [{ label:'Total', value: q.sellingPriceTotal, bold:true }],
+        notes: q.notes,
+        payment: (business.bankName || business.accountNumber) ? business : null,
+        footerThanks: business.legalName
+      };
+      var pdf = buildSheetPdf(model);
+      pdf.save((q.quoteNumber || 'quote') + '.pdf');
       quotePdfBusy = null;
       render();
     }).catch(function(){
@@ -4357,6 +4591,8 @@
       '<div class="sheet-dates" style="margin-top:8px;">Issued '+fmtDate(d.dateIssued)+'<br>'+(d.kind==='invoice'?'Due ':'Valid until ')+fmtDate(d.dateDue)+'</div></div>';
     html += '</div>';
 
+    html += renderSheetPaymentBlock();
+
     html += '<div class="sheet-parties"><div class="block"><div class="label">Billed to</div>' +
       '<strong>'+esc(c.name||'—')+'</strong><br>' +
       (c.company? esc(c.company)+'<br>' : '') +
@@ -4379,16 +4615,6 @@
 
     if(d.notes) html += '<div class="sheet-notes">'+esc(d.notes)+'</div>';
 
-    if(business.bankName || business.accountNumber){
-      html += '<div class="sheet-pay"><div class="label">Payment details</div>' +
-        (business.bankName? business.bankName+'<br>':'') +
-        (business.accountHolder? 'Account holder: '+esc(business.accountHolder)+'<br>':'') +
-        (business.accountNumber? 'Account number: '+esc(business.accountNumber)+'<br>':'') +
-        (business.branchCode? 'Branch code: '+esc(business.branchCode)+'<br>':'') +
-        (business.accountType? esc(business.accountType):'') +
-        '</div>';
-    }
-
     html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
     html += '</div></div>';
 
@@ -4410,31 +4636,36 @@
 
   function downloadPdf(d){
     if(pdfBusy) return;
-    var el = document.querySelector('.sheet');
-    if(!el){ return; }
-    if(!window.html2pdf){
+    if(!getJsPDF()){
       alertBanner('Could not load the PDF tool — printing instead.');
       window.print();
       return;
     }
     pdfBusy = d.id;
     render();
-    var opt = {
-      margin: 0,
-      filename: (d.number || 'document') + '.pdf',
-      // PNG instead of JPEG: lossless, so text stays crisp instead of getting slightly fuzzy
-      // from JPEG compression. scale 3 (up from 2) renders at a higher pixel density before
-      // it's placed on the page, for sharper text and the logo.
-      image: { type: 'png' },
-      html2canvas: { scale: 3, useCORS: true, backgroundColor: '#ffffff' },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      // Without this, a tall invoice/quote just gets sliced wherever the page boundary
-      // happens to fall — including straight through the middle of a line-item row or the
-      // banking details block. This keeps those together, pushing the whole block to the
-      // next page instead of cutting it in half.
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.totals', '.sheet-notes', '.sheet-pay', '.sheet-foot', '.sheet-parties'] }
-    };
-    window.html2pdf().set(opt).from(el).save().then(function(){
+    var t = docTotals(d);
+    // Only a Solid Prints document (typed directly, or converted from an SP quote) carries
+    // the Solid Prints logo — a plain Charl Engelbrecht invoice/quote shouldn't, same rule
+    // renderDocView uses on screen.
+    var isSpDoc = d.kind==='invoice' && (!!d.fromSpQuote || !!d.spInvoice);
+    loadImageForPdf(isSpDoc ? spSettings.logoDataUrl : null).then(function(logo){
+      var totalsRows = [{ label:'Subtotal', value: t.subtotal, bold:false }];
+      if(d.vatEnabled) totalsRows.push({ label:'VAT (15%)', value: t.vat, bold:false });
+      totalsRows.push({ label:'Total', value: t.total, bold:true });
+      var model = {
+        kind: d.kind==='invoice' ? 'INVOICE' : 'QUOTE', number: d.number || 'document',
+        dateIssuedLabel: 'Issued', dateIssued: d.dateIssued,
+        dateDueLabel: d.kind==='invoice' ? 'Due' : 'Valid until', dateDue: d.dateDue,
+        business: business, logo: logo,
+        partyLabel: 'Billed to', party: d.clientSnapshot || {},
+        items: d.items || [],
+        totalsRows: totalsRows,
+        notes: d.notes,
+        payment: (business.bankName || business.accountNumber) ? business : null,
+        footerThanks: business.legalName
+      };
+      var pdf = buildSheetPdf(model);
+      pdf.save((d.number || 'document') + '.pdf');
       pdfBusy = null;
       render();
     }).catch(function(){
