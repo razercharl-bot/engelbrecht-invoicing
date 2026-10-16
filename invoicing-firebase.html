@@ -290,6 +290,15 @@
   .sheet-pay{ margin-top:18px; font-size:12.5px; color:#39413c; }
   .sheet-pay .label{ font-size:10.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#8a9189; margin-bottom:5px; }
   .sheet-foot{ margin-top:34px; padding-top:14px; border-top:1px solid #dfe3de; font-size:11.5px; color:#8a9189; text-align:center; }
+  /* Keep these blocks (and every line-item row) from being sliced in half across a page
+     boundary when the sheet is exported to PDF or printed — a banking-details or line-item
+     row cut in two mid-block reads as broken/unprofessional, which is exactly what happened
+     before this was added. Both the modern `break-inside` and legacy `page-break-inside`
+     are set since different renderers (html2canvas/jsPDF vs. the browser's own print engine)
+     honour one or the other. */
+  .sheet-parties, .sheet .totals, .sheet-notes, .sheet-pay, .sheet-foot, .sheet table tr{
+    break-inside:avoid; page-break-inside:avoid;
+  }
   .sheet tbody tr:hover{ background:transparent; }
 
   .doc-toolbar{ display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
@@ -501,6 +510,7 @@
   var spQuotes = [];         // saved Solid Prints quotes — each doc is a full, frozen cost snapshot (see freezeQuoteFromCalc)
   var quoteFilter = { status: '', billingStatus: '', clientId: '', printerId: '', minProfit: '', maxProfit: '', from: '', to: '' };
   var worksheetShowAll = false; // Work Sheet defaults to just in-production orders (Accepted/Printing); toggle to also see Completed ones
+  var manualQuoteDraft = null; // working copy for the "+ New quote (without Calculator)" form
 
   function defaultSpSettings(){
     return {
@@ -1202,6 +1212,69 @@
       });
     }
   }
+  // Builds an `spQuotes`-compatible snapshot from the simple manual-quote form, instead of
+  // from a Calculator job (freezeQuoteFromCalc above). Every field that a Calculator-built
+  // quote would normally populate from job costing (filament/printer/labour/etc.) is filled
+  // in with a safe zero/empty value here, so this quote looks and behaves exactly like any
+  // other one everywhere else in the app — the Quotes list, dashboard, Work Sheet, its own
+  // print/PDF sheet, and "Create invoice from this quote" all just work, unmodified, against
+  // a quote that happens to have no cost breakdown. `calcType: 'single'` and `printerId: ''`
+  // mean "Edit in Calculator" still works later too, if the user ever wants to add real costing.
+  function freezeManualQuote(){
+    var m = manualQuoteDraft;
+    var client = clients.find(function(c){ return c.id === m.clientId; }) || null;
+    var quantity = Math.max(1, Number(m.quantity) || 1);
+    var pricePerUnit = Math.max(0, Number(m.sellingPricePerUnit) || 0);
+    var priceTotal = Math.round(pricePerUnit * quantity * 100) / 100;
+    var cost = Math.max(0, Number(m.cost) || 0);
+    var profit = Math.round((priceTotal - cost) * 100) / 100;
+    var margin = priceTotal > 0 ? (profit / priceTotal * 100) : 0;
+    return {
+      quoteDate: todayISO(), validUntil: m.validUntil || addDays(todayISO(), 14),
+      clientId: m.clientId || '',
+      clientSnapshot: client ? {name:client.name, company:client.company, email:client.email, phone:client.phone, address:client.address} : null,
+      notes: m.notes || '',
+      jobName: (m.jobName || '').trim() || 'Quote',
+      isManualQuote: true,
+      calcType: 'single', quantity: quantity, unitsPerPlate: 0, plates: 0,
+      printTimePerPlate: 0, printTimeHours: 0, totalPrintHours: 0, turnaroundHours: 0,
+      isSplit: false, printerId: '', printerSnapshot: null, legs: [], printerSplitsInput: [],
+      isMultiPart: false, parts: [], partsInput: [],
+      filamentLines: [], filamentGramsInput: {},
+      wasteGrams: 0, failureAllowancePct: 0,
+      totalFilamentRawG: 0, totalFilamentCostedG: 0, filamentCost: 0,
+      electricityRateSnapshot: 0, electricityCost: 0,
+      machineCost: 0, machineHourlyRate: 0,
+      labourEnabled: false, labourHours: 0, labourRateSnapshot: 0, labourCost: 0,
+      postProcessing: [], postProcessingCost: 0,
+      consumablesUsed: [], consumablesCost: 0,
+      packagingCost: 0,
+      otherCosts: [], otherCost: cost,
+      totalCost: cost, costPerUnit: quantity ? Math.round((cost/quantity)*100)/100 : 0,
+      rounding: 'none', roundingCustom: 0,
+      customPriceUsed: true, markupPctUsed: null,
+      sellingPricePerUnit: pricePerUnit, sellingPriceTotal: priceTotal,
+      discount: 0, finalPrice: priceTotal,
+      profit: profit, profitMargin: margin, actualMarkupPct: null,
+      convertedToInvoiceNumber: null
+    };
+  }
+  function saveManualSpQuote(){
+    if(!dbNS) return;
+    var snap = freezeManualQuote();
+    var now = new Date().toISOString();
+    snap.startDate = '';
+    snap.status = 'Draft';
+    snap.billingStatus = 'Not invoiced';
+    snap.quoteNumber = nextSpQuoteNumber();
+    snap.createdAt = now; snap.updatedAt = now;
+    snap.completedQuantity = 0;
+    snap.legsCompleted = [];
+    dbNS.collection('spQuotes').add(snap).then(function(ref){
+      bumpSpQuoteCounter();
+      go('spQuoteView', { id: ref.id });
+    });
+  }
   // Production status (Draft…Completed/Cancelled) and billing status (Not invoiced/Invoiced/
   // Paid) are independent — e.g. an order can be "Printing" and "Invoiced" (paid a deposit
   // upfront) at the same time. Each has its own setter and its own field on the doc.
@@ -1598,6 +1671,9 @@
         if(params && params.clientId) reportDraft.clientId = params.clientId;
       }
     }
+    if(name === 'newSpQuote'){
+      manualQuoteDraft = blankManualQuoteDraft();
+    }
     syncHashForView(name, params);
     window.scrollTo(0,0);
     render();
@@ -1635,6 +1711,14 @@
     var copy = JSON.parse(JSON.stringify(d));
     if(!copy.items || !copy.items.length) copy.items = [{description:'', qty:1, unitPrice:0}];
     return copy;
+  }
+  // Working copy for the Solid Prints "+ New quote (without Calculator)" form — a much
+  // shorter set of fields than the Calculator's `calc` state, since there's no job costing
+  // here: just enough to bill a client for a flat price. `cost` is optional and only used
+  // for the quote's own profit/margin figures (defaults to 0, meaning the quote shows a
+  // 100% margin, which is fine — it's informational, not required).
+  function blankManualQuoteDraft(){
+    return { clientId:'', jobName:'', quantity:1, sellingPricePerUnit:0, cost:0, validUntil: addDays(todayISO(),14), notes:'This quote is valid for 14 days from the date above.' };
   }
   function draftTotals(){
     var subtotal = (draft.items||[]).reduce(function(sum, it){ return sum + (Number(it.qty)||0) * (Number(it.unitPrice)||0); }, 0);
@@ -1942,6 +2026,7 @@
       case 'settings': html += renderSettings(); break;
       case 'newDoc': html += renderEditor(); break;
       case 'viewDoc': html += renderDocView(); break;
+      case 'newSpQuote': html += renderNewSpQuote(); break;
       default: html += renderDashboard();
     }
     el.innerHTML = html;
@@ -1952,6 +2037,7 @@
     if(view.name === 'spquotes') wireSpQuotesEvents();
     if(view.name === 'spQuoteView') wireSpQuoteViewEvents();
     if(view.name === 'worksheet') wireWorkSheetEvents();
+    if(view.name === 'newSpQuote') wireNewSpQuoteEvents();
     if(view.name === 'settings' && workspace === 'sp') wireSpSettingsEvents();
   }
 
@@ -2118,7 +2204,7 @@
     var html = '<div class="card card-pad" style="margin-bottom:22px;">';
     html += '<div class="view-head" style="margin-bottom:16px;"><div><h2 style="font-size:16px;">🖨️ Solid Prints — this month</h2>' +
       '<div class="view-sub">Revenue, profit &amp; utilisation count quotes Accepted or further along · quote date in ' + monthLabel(monthKey) + '</div></div>' +
-      '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote</button><button class="btn" data-nav="spquotes">View all quotes</button></div></div>';
+      '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote</button><button class="btn" data-nav="newSpQuote">+ New quote (without Calculator)</button><button class="btn" data-nav="spquotes">View all quotes</button></div></div>';
 
     html += '<div class="grid grid-4" style="margin-bottom:18px;">' +
       statCard('Prints completed', String(printsThisMonth), '') +
@@ -3485,7 +3571,8 @@
   function renderSpQuotes(){
     var list = filteredSpQuotes();
     var html = '<div class="view-head"><div><h1>Quotes</h1><div class="view-sub">3D print quotes with permanently frozen cost snapshots</div></div>' +
-      '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote (via Calculator)</button></div></div>';
+      '<div class="actions-row"><button class="btn btn-primary" data-nav="calculator">+ New quote (via Calculator)</button>' +
+      '<button class="btn" data-nav="newSpQuote">+ New quote (without Calculator)</button></div></div>';
 
     html += '<div class="card card-pad" style="margin-bottom:16px;">';
     html += '<form id="spquote-filter-form">';
@@ -3511,8 +3598,9 @@
 
     html += '<div class="card">';
     if(!spQuotes.length){
-      html += emptyState('🧾','No quotes yet','Build a job in the Calculator, then save it as a quote — its costs are frozen for good the moment you save.', [
-        {label:'Open Calculator', nav:'calculator', primary:true}
+      html += emptyState('🧾','No quotes yet','Build a job in the Calculator, then save it as a quote — its costs are frozen for good the moment you save. Or skip the Calculator and just type up a quick quote.', [
+        {label:'Open Calculator', nav:'calculator', primary:true},
+        {label:'New quote without Calculator', nav:'newSpQuote'}
       ]);
     } else if(!list.length){
       html += emptyState('🧾','No quotes match these filters','Try clearing a filter above.', [
@@ -3706,6 +3794,76 @@
     });
   }
 
+  /* ---------------- manual quote entry (skip the Calculator entirely) ---------------- */
+  function renderNewSpQuote(){
+    var m = manualQuoteDraft;
+    var priceTotal = Math.max(1, Number(m.quantity)||1) * (Number(m.sellingPricePerUnit)||0);
+    var html = '<div class="view-head"><div><h1>New quote</h1><div class="view-sub">A quick quote at a flat price — no job costing, no Calculator</div></div>' +
+      '<div class="actions-row"><button class="btn" data-nav="spquotes">Cancel</button><button class="btn btn-primary" id="save-manual-quote-btn">Save quote</button></div></div>';
+
+    html += '<div class="card card-pad">';
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Client</label><select id="mq-client">' +
+      '<option value="">Choose a client…</option>' +
+      clients.map(function(c){ return '<option value="'+c.id+'"'+(m.clientId===c.id?' selected':'')+'>'+esc(c.name)+(c.company?' — '+esc(c.company):'')+'</option>'; }).join('') +
+      '</select><div class="hint"><a href="#" id="mq-add-client-inline">+ Add a new client</a></div></div>';
+    html += '<div class="field"><label>Valid until</label><input id="mq-valid-until" type="date" value="'+esc(m.validUntil)+'"></div>';
+    html += '</div>';
+
+    html += '<div class="field-row">';
+    html += '<div class="field" style="flex:2;"><label>Job name</label><input id="mq-job-name" type="text" value="'+esc(m.jobName)+'" placeholder="What are you quoting for?"></div>';
+    html += '<div class="field"><label>Quantity</label><input id="mq-quantity" type="number" min="1" step="1" value="'+m.quantity+'"></div>';
+    html += '</div>';
+
+    html += '<div class="field-row">';
+    html += '<div class="field"><label>Price per unit</label><input id="mq-price" type="number" min="0" step="0.01" value="'+m.sellingPricePerUnit+'"></div>';
+    html += '<div class="field"><label>Your cost <span style="font-weight:400; color:var(--ink-faint);">— optional, just for your own profit tracking</span></label><input id="mq-cost" type="number" min="0" step="0.01" value="'+m.cost+'"></div>';
+    html += '</div>';
+
+    html += '<div class="totals" style="margin-top:10px; max-width:320px;">' +
+      '<div class="totals-row total"><span>Total</span><span class="mono" id="mq-total">'+fmtMoney(priceTotal)+'</span></div>' +
+      '</div>';
+
+    html += '<div class="field" style="margin-top:22px;"><label>Notes / terms</label><textarea id="mq-notes">'+esc(m.notes)+'</textarea></div>';
+    html += '</div>';
+    return html;
+  }
+  function wireNewSpQuoteEvents(){
+    var clientSel = document.getElementById('mq-client');
+    if(clientSel) clientSel.addEventListener('change', function(){ manualQuoteDraft.clientId = this.value; });
+    var validEl = document.getElementById('mq-valid-until');
+    if(validEl) validEl.addEventListener('change', function(){ manualQuoteDraft.validUntil = this.value; });
+    var jobEl = document.getElementById('mq-job-name');
+    if(jobEl) jobEl.addEventListener('input', function(){ manualQuoteDraft.jobName = this.value; });
+    var qtyEl = document.getElementById('mq-quantity');
+    var priceEl = document.getElementById('mq-price');
+    var updateTotal = function(){
+      manualQuoteDraft.quantity = Number(qtyEl.value)||0;
+      manualQuoteDraft.sellingPricePerUnit = Number(priceEl.value)||0;
+      var total = Math.max(1, Number(manualQuoteDraft.quantity)||1) * (Number(manualQuoteDraft.sellingPricePerUnit)||0);
+      var totalEl = document.getElementById('mq-total');
+      if(totalEl) totalEl.textContent = fmtMoney(total);
+    };
+    if(qtyEl) qtyEl.addEventListener('input', updateTotal);
+    if(priceEl) priceEl.addEventListener('input', updateTotal);
+    var costEl = document.getElementById('mq-cost');
+    if(costEl) costEl.addEventListener('input', function(){ manualQuoteDraft.cost = Number(this.value)||0; });
+    var notesEl = document.getElementById('mq-notes');
+    if(notesEl) notesEl.addEventListener('input', function(){ manualQuoteDraft.notes = this.value; });
+
+    var addClientLink = document.getElementById('mq-add-client-inline');
+    if(addClientLink) addClientLink.addEventListener('click', function(e){ e.preventDefault(); modal = {type:'client', editingId:null, returnToEditor:true}; render(); });
+
+    var saveBtn = document.getElementById('save-manual-quote-btn');
+    if(saveBtn) saveBtn.addEventListener('click', function(){
+      if(!(manualQuoteDraft.jobName||'').trim()){
+        alertBanner('Give the quote a job name before saving.');
+        return;
+      }
+      saveManualSpQuote();
+    });
+  }
+
   /* ---------------- Work Sheet — check off completed units per order ---------------- */
   // Orders on the floor: Accepted/Printing by default, plus Completed/Invoiced/Paid when
   // the "also show" toggle is on (handy to double-check a finished order's tally).
@@ -3886,9 +4044,17 @@
     var opt = {
       margin: 0,
       filename: (q.quoteNumber || 'quote') + '.pdf',
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      // PNG instead of JPEG: lossless, so text stays crisp instead of getting slightly fuzzy
+      // from JPEG compression. scale 3 (up from 2) renders at a higher pixel density before
+      // it's placed on the page, for sharper text and the logo.
+      image: { type: 'png' },
+      html2canvas: { scale: 3, useCORS: true, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      // Without this, a tall quote/invoice just gets sliced wherever the page boundary
+      // happens to fall — including straight through the middle of a line-item row or the
+      // banking details block. This keeps those together, pushing the whole block to the
+      // next page instead of cutting it in half.
+      pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.totals', '.sheet-notes', '.sheet-pay', '.sheet-foot', '.sheet-parties'] }
     };
     window.html2pdf().set(opt).from(el).save().then(function(){
       quotePdfBusy = null;
@@ -4094,7 +4260,12 @@
 
   function wireEditorEvents(){
     var kindSel = document.getElementById('f-kind');
-    if(kindSel) kindSel.addEventListener('change', function(){ draft.kind = this.value; render(); wireEditorEvents(); });
+    // Just `render()` — it already re-wires the editor for the 'newDoc' view (see the main
+    // render() dispatcher). Also calling wireEditorEvents() here attached a second set of
+    // listeners to the same freshly-rendered elements, so every subsequent click/change fired
+    // twice, then four times, then eight — a real bug that made "+ Add line" insert multiple
+    // rows per click the longer an invoice/quote was edited.
+    if(kindSel) kindSel.addEventListener('change', function(){ draft.kind = this.value; render(); });
 
     var clientSel = document.getElementById('f-client');
     if(clientSel) clientSel.addEventListener('change', function(){ draft.clientId = this.value; });
@@ -4104,7 +4275,7 @@
     var issuedEl = document.getElementById('f-issued');
     if(issuedEl) issuedEl.addEventListener('change', function(){ draft.dateIssued = this.value; });
     var vatEl = document.getElementById('f-vat');
-    if(vatEl) vatEl.addEventListener('change', function(){ draft.vatEnabled = this.checked; render(); wireEditorEvents(); });
+    if(vatEl) vatEl.addEventListener('change', function(){ draft.vatEnabled = this.checked; render(); });
     var notesEl = document.getElementById('f-notes');
     if(notesEl) notesEl.addEventListener('input', function(){ draft.notes = this.value; });
 
@@ -4121,12 +4292,12 @@
 
     document.getElementById('add-item-btn').addEventListener('click', function(){
       draft.items.push({description:'', qty:1, unitPrice:0});
-      render(); wireEditorEvents();
+      render();
     });
     document.getElementById('items-body').addEventListener('click', function(e){
       var btn = e.target.closest('[data-remove-item]'); if(!btn) return;
       var idx = Number(btn.getAttribute('data-remove-item'));
-      if(draft.items.length>1){ draft.items.splice(idx,1); render(); wireEditorEvents(); }
+      if(draft.items.length>1){ draft.items.splice(idx,1); render(); }
     });
 
     var addClientLink = document.getElementById('add-client-inline');
@@ -4251,9 +4422,17 @@
     var opt = {
       margin: 0,
       filename: (d.number || 'document') + '.pdf',
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      // PNG instead of JPEG: lossless, so text stays crisp instead of getting slightly fuzzy
+      // from JPEG compression. scale 3 (up from 2) renders at a higher pixel density before
+      // it's placed on the page, for sharper text and the logo.
+      image: { type: 'png' },
+      html2canvas: { scale: 3, useCORS: true, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      // Without this, a tall invoice/quote just gets sliced wherever the page boundary
+      // happens to fall — including straight through the middle of a line-item row or the
+      // banking details block. This keeps those together, pushing the whole block to the
+      // next page instead of cutting it in half.
+      pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.totals', '.sheet-notes', '.sheet-pay', '.sheet-foot', '.sheet-parties'] }
     };
     window.html2pdf().set(opt).from(el).save().then(function(){
       pdfBusy = null;
@@ -4812,7 +4991,9 @@
         var editingId = modal.editingId;
         var newId = saveClient(data, editingId);
         modal = null;
-        if(wasReturnToEditor && draft){
+        if(wasReturnToEditor && view.name === 'newSpQuote' && manualQuoteDraft){
+          manualQuoteDraft.clientId = editingId || newId;
+        } else if(wasReturnToEditor && draft){
           draft.clientId = editingId || newId;
         }
         render();
