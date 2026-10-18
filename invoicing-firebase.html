@@ -1240,31 +1240,40 @@
       });
     }
   }
-  // Builds an `spQuotes`-compatible snapshot from the simple manual-quote form, instead of
-  // from a Calculator job (freezeQuoteFromCalc above). Every field that a Calculator-built
-  // quote would normally populate from job costing (filament/printer/labour/etc.) is filled
-  // in with a safe zero/empty value here, so this quote looks and behaves exactly like any
+  // Builds an `spQuotes`-compatible snapshot from the manual-quote form, instead of from a
+  // Calculator job (freezeQuoteFromCalc above). Every field that a Calculator-built quote
+  // would normally populate from job costing (filament/printer/labour/etc.) is filled in
+  // with a safe zero/empty value here, so this quote looks and behaves exactly like any
   // other one everywhere else in the app — the Quotes list, dashboard, Work Sheet, its own
   // print/PDF sheet, and "Create invoice from this quote" all just work, unmodified, against
-  // a quote that happens to have no cost breakdown. `calcType: 'single'` and `printerId: ''`
-  // mean "Edit in Calculator" still works later too, if the user ever wants to add real costing.
+  // a quote that happens to have no cost breakdown. The real content now lives in `items`
+  // (same shape as a document's line items), with `jobName`/`quantity`/`sellingPricePerUnit`
+  // kept alongside only as a readable summary for places that still expect a single row (the
+  // Quotes list table, the dashboard's "prints completed" count) — every place that renders
+  // the quote itself (its sheet/PDF, converting it to an invoice) reads `items` directly.
   function freezeManualQuote(){
     var m = manualQuoteDraft;
     var client = clients.find(function(c){ return c.id === m.clientId; }) || null;
-    var quantity = Math.max(1, Number(m.quantity) || 1);
-    var pricePerUnit = Math.max(0, Number(m.sellingPricePerUnit) || 0);
-    var priceTotal = Math.round(pricePerUnit * quantity * 100) / 100;
+    var items = (m.items || [])
+      .filter(function(it){ return (it.description||'').trim() !== '' || Number(it.unitPrice) || Number(it.qty) !== 1; })
+      .map(function(it){ return { description: (it.description||'').trim(), qty: Math.max(0, Number(it.qty)||0), unitPrice: Math.max(0, Number(it.unitPrice)||0) }; });
+    if(!items.length) items = [{ description: 'Quote', qty: 1, unitPrice: 0 }];
+    var priceTotal = Math.round(items.reduce(function(s,it){ return s + it.qty*it.unitPrice; }, 0) * 100) / 100;
+    var totalQty = items.reduce(function(s,it){ return s + it.qty; }, 0) || 1;
     var cost = Math.max(0, Number(m.cost) || 0);
     var profit = Math.round((priceTotal - cost) * 100) / 100;
     var margin = priceTotal > 0 ? (profit / priceTotal * 100) : 0;
+    var summaryName = items[0].description || 'Quote';
+    if(items.length > 1) summaryName += ' +' + (items.length - 1) + ' more';
     return {
       quoteDate: todayISO(), validUntil: m.validUntil || addDays(todayISO(), 14),
       clientId: m.clientId || '',
       clientSnapshot: client ? {name:client.name, company:client.company, email:client.email, phone:client.phone, address:client.address} : null,
       notes: m.notes || '',
-      jobName: (m.jobName || '').trim() || 'Quote',
+      items: items,
+      jobName: summaryName,
       isManualQuote: true,
-      calcType: 'single', quantity: quantity, unitsPerPlate: 0, plates: 0,
+      calcType: 'single', quantity: totalQty, unitsPerPlate: 0, plates: 0,
       printTimePerPlate: 0, printTimeHours: 0, totalPrintHours: 0, turnaroundHours: 0,
       isSplit: false, printerId: '', printerSnapshot: null, legs: [], printerSplitsInput: [],
       isMultiPart: false, parts: [], partsInput: [],
@@ -1278,10 +1287,10 @@
       consumablesUsed: [], consumablesCost: 0,
       packagingCost: 0,
       otherCosts: [], otherCost: cost,
-      totalCost: cost, costPerUnit: quantity ? Math.round((cost/quantity)*100)/100 : 0,
+      totalCost: cost, costPerUnit: totalQty ? Math.round((cost/totalQty)*100)/100 : 0,
       rounding: 'none', roundingCustom: 0,
       customPriceUsed: true, markupPctUsed: null,
-      sellingPricePerUnit: pricePerUnit, sellingPriceTotal: priceTotal,
+      sellingPricePerUnit: totalQty ? Math.round((priceTotal/totalQty)*100)/100 : priceTotal, sellingPriceTotal: priceTotal,
       discount: 0, finalPrice: priceTotal,
       profit: profit, profitMargin: margin, actualMarkupPct: null,
       convertedToInvoiceNumber: null
@@ -1331,7 +1340,9 @@
     var inv = blankDraft('invoice');
     inv.clientId = q.clientId || '';
     inv.clientSnapshot = q.clientSnapshot;
-    inv.items = [{ description: q.jobName, qty: q.quantity, unitPrice: Math.round((Number(q.sellingPricePerUnit)||0) * 100) / 100 }];
+    inv.items = (q.items && q.items.length)
+      ? q.items.map(function(it){ return { description: it.description, qty: it.qty, unitPrice: Math.round((Number(it.unitPrice)||0) * 100) / 100 }; })
+      : [{ description: q.jobName, qty: q.quantity, unitPrice: Math.round((Number(q.sellingPricePerUnit)||0) * 100) / 100 }];
     inv.notes = 'From Solid Prints quote ' + q.quoteNumber + '. Payment due within 7 days of the invoice date. Thank you for your business.';
     inv.fromQuote = q.quoteNumber;
     // Distinguishes this from a Charl Engelbrecht quote-to-invoice conversion (which also
@@ -1389,6 +1400,22 @@
     calc.startDate = ''; // a duplicated order is a fresh job — don't carry over the old start date
     calcEditingQuoteId = null;
     go('calculator');
+  }
+  // A quote with its own line items (built in the "without Calculator" form) can't round-trip
+  // through the Calculator's single-job fields without losing every line but one, so duplicate
+  // it the same way a document duplicates — a fresh copy of the same multi-line form.
+  function duplicateManualQuote(q){
+    // go() always resets manualQuoteDraft to blank for this view, so the copy has to be
+    // built after navigating there, not before.
+    go('newSpQuote');
+    manualQuoteDraft = {
+      clientId: q.clientId || '',
+      items: JSON.parse(JSON.stringify(q.items)),
+      cost: q.totalCost || 0,
+      validUntil: addDays(todayISO(), 14),
+      notes: q.notes || ''
+    };
+    render();
   }
 
   function defaultBusiness(){
@@ -1740,13 +1767,14 @@
     if(!copy.items || !copy.items.length) copy.items = [{description:'', qty:1, unitPrice:0}];
     return copy;
   }
-  // Working copy for the Solid Prints "+ New quote (without Calculator)" form — a much
-  // shorter set of fields than the Calculator's `calc` state, since there's no job costing
-  // here: just enough to bill a client for a flat price. `cost` is optional and only used
-  // for the quote's own profit/margin figures (defaults to 0, meaning the quote shows a
+  // Working copy for the Solid Prints "+ New quote (without Calculator)" form. Deliberately
+  // shaped just like a document draft's `items` array (blankDraft, above) so this form works
+  // exactly the way creating an invoice does — a line-items table you can add/remove rows
+  // from, rather than being limited to one job name/qty/price. `cost` is optional and only
+  // used for the quote's own profit/margin figures (defaults to 0, meaning the quote shows a
   // 100% margin, which is fine — it's informational, not required).
   function blankManualQuoteDraft(){
-    return { clientId:'', jobName:'', quantity:1, sellingPricePerUnit:0, cost:0, validUntil: addDays(todayISO(),14), notes:'This quote is valid for 14 days from the date above.' };
+    return { clientId:'', items:[{description:'', qty:1, unitPrice:0}], cost:0, validUntil: addDays(todayISO(),14), notes:'This quote is valid for 14 days from the date above.' };
   }
   function draftTotals(){
     var subtotal = (draft.items||[]).reduce(function(sum, it){ return sum + (Number(it.qty)||0) * (Number(it.unitPrice)||0); }, 0);
@@ -3679,7 +3707,10 @@
     var html = '<div class="doc-toolbar no-print">';
     html += '<div class="actions-row">';
     html += '<button class="btn" data-nav="spquotes">← Back</button>';
-    html += '<button class="btn" data-edit-quote="'+q.id+'">Edit in Calculator</button>';
+    // Only a single-job quote (built in the Calculator, or an old-style manual quote from
+    // before it had its own line-items table) can round-trip through "Edit in Calculator" —
+    // the Calculator has no way to represent several line items at once.
+    if(!(q.items && q.items.length)) html += '<button class="btn" data-edit-quote="'+q.id+'">Edit in Calculator</button>';
     html += '<button class="btn" data-duplicate-quote="'+q.id+'">Duplicate</button>';
     html += '<button class="btn btn-primary" data-download-quote-pdf="'+q.id+'"'+(quotePdfBusy===q.id?' disabled':'')+'>'+(quotePdfBusy===q.id?'Preparing PDF…':'Download PDF')+'</button>';
     html += '<button class="btn" onclick="window.print()">Print</button>';
@@ -3748,10 +3779,18 @@
       '</div></div>';
 
     html += '<div class="table-wrap"><table><thead><tr><th>Description</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Unit price</th><th style="text-align:right;">Amount</th></tr></thead><tbody>';
-    html += '<tr><td>'+esc(q.jobName)+'</td><td class="num-cell">'+q.quantity+'</td><td class="num-cell">'+fmtMoney(q.sellingPricePerUnit)+'</td><td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td></tr>';
+    if(q.items && q.items.length){
+      q.items.forEach(function(it){
+        var amt = (Number(it.qty)||0) * (Number(it.unitPrice)||0);
+        html += '<tr><td>'+esc(it.description)+'</td><td class="num-cell">'+it.qty+'</td><td class="num-cell">'+fmtMoney(it.unitPrice)+'</td><td class="num-cell">'+fmtMoney(amt)+'</td></tr>';
+      });
+    } else {
+      html += '<tr><td>'+esc(q.jobName)+'</td><td class="num-cell">'+q.quantity+'</td><td class="num-cell">'+fmtMoney(q.sellingPricePerUnit)+'</td><td class="num-cell">'+fmtMoney(q.sellingPriceTotal)+'</td></tr>';
+    }
     html += '</tbody></table></div>';
 
     html += '<div class="totals" style="margin-top:16px;">' +
+      '<div class="totals-row"><span>Subtotal</span><span class="mono">'+fmtMoney(q.sellingPriceTotal)+'</span></div>' +
       '<div class="totals-row total"><span>Total</span><span class="mono">'+fmtMoney(q.sellingPriceTotal)+'</span></div>' +
       '</div>';
 
@@ -3815,10 +3854,16 @@
   }
 
   /* ---------------- manual quote entry (skip the Calculator entirely) ---------------- */
+  // This mirrors renderEditor()/wireEditorEvents() (the invoice/document form) on purpose —
+  // a line-items table you add/remove rows from, not a single job name/qty/price — so
+  // quoting without the Calculator works exactly the way creating an invoice does. The only
+  // things it drops versus a real document are VAT and a due/issued date pair (a quote here
+  // only needs "valid until"), plus it adds the optional "Your cost" field for profit
+  // tracking, since that's specific to Solid Prints quotes.
   function renderNewSpQuote(){
     var m = manualQuoteDraft;
-    var priceTotal = Math.max(1, Number(m.quantity)||1) * (Number(m.sellingPricePerUnit)||0);
-    var html = '<div class="view-head"><div><h1>New quote</h1><div class="view-sub">A quick quote at a flat price — no job costing, no Calculator</div></div>' +
+    var subtotal = (m.items||[]).reduce(function(sum, it){ return sum + (Number(it.qty)||0) * (Number(it.unitPrice)||0); }, 0);
+    var html = '<div class="view-head"><div><h1>New quote</h1><div class="view-sub">A flat-rate quote with your own line items — no job costing, no Calculator</div></div>' +
       '<div class="actions-row"><button class="btn" data-nav="spquotes">Cancel</button><button class="btn btn-primary" id="save-manual-quote-btn">Save quote</button></div></div>';
 
     html += '<div class="card card-pad">';
@@ -3830,42 +3875,61 @@
     html += '<div class="field"><label>Valid until</label><input id="mq-valid-until" type="date" value="'+esc(m.validUntil)+'"></div>';
     html += '</div>';
 
-    html += '<div class="field-row">';
-    html += '<div class="field" style="flex:2;"><label>Job name</label><input id="mq-job-name" type="text" value="'+esc(m.jobName)+'" placeholder="What are you quoting for?"></div>';
-    html += '<div class="field"><label>Quantity</label><input id="mq-quantity" type="number" min="1" step="1" value="'+m.quantity+'"></div>';
-    html += '</div>';
+    html += '<h3 style="font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin:22px 0 10px;">Line items</h3>';
+    html += '<div class="table-wrap"><table class="items-table"><thead><tr><th class="desc-col">Description</th><th class="num-col">Qty</th><th class="num-col">Unit price</th><th class="num-col">Line total</th><th class="del-col"></th></tr></thead><tbody id="mq-items-body">';
+    html += m.items.map(function(it,i){ return mqItemRow(it,i); }).join('');
+    html += '</tbody></table></div>';
+    html += '<button class="btn btn-sm" id="mq-add-item-btn" style="margin-top:10px;">+ Add line</button>';
 
-    html += '<div class="field-row">';
-    html += '<div class="field"><label>Price per unit</label><input id="mq-price" type="number" min="0" step="0.01" value="'+m.sellingPricePerUnit+'"></div>';
-    html += '<div class="field"><label>Your cost <span style="font-weight:400; color:var(--ink-faint);">— optional, just for your own profit tracking</span></label><input id="mq-cost" type="number" min="0" step="0.01" value="'+m.cost+'"></div>';
-    html += '</div>';
-
-    html += '<div class="totals" style="margin-top:10px; max-width:320px;">' +
-      '<div class="totals-row total"><span>Total</span><span class="mono" id="mq-total">'+fmtMoney(priceTotal)+'</span></div>' +
+    html += '<div class="totals" style="margin-top:22px; max-width:320px;">' +
+      '<div class="totals-row total"><span>Total</span><span class="mono" id="mq-total">'+fmtMoney(subtotal)+'</span></div>' +
       '</div>';
+
+    html += '<div class="field" style="margin-top:22px; max-width:320px;"><label>Your cost <span style="font-weight:400; color:var(--ink-faint);">— optional, just for your own profit tracking</span></label><input id="mq-cost" type="number" min="0" step="0.01" value="'+m.cost+'"></div>';
 
     html += '<div class="field" style="margin-top:22px;"><label>Notes / terms</label><textarea id="mq-notes">'+esc(m.notes)+'</textarea></div>';
     html += '</div>';
     return html;
+  }
+  function mqItemRow(it,i){
+    var lineTotal = (Number(it.qty)||0) * (Number(it.unitPrice)||0);
+    return '<tr data-idx="'+i+'">' +
+      '<td><input class="mq-it-desc" type="text" value="'+esc(it.description)+'" placeholder="What are you quoting for?"></td>' +
+      '<td><input class="mq-it-qty mono" type="number" min="0" step="0.5" value="'+it.qty+'"></td>' +
+      '<td><input class="mq-it-price mono" type="number" min="0" step="0.01" value="'+it.unitPrice+'"></td>' +
+      '<td class="num-cell mono" data-line-total>'+fmtMoney(lineTotal)+'</td>' +
+      '<td><button class="btn btn-sm btn-ghost btn-danger" data-mq-remove-item="'+i+'" title="Remove line">✕</button></td>' +
+      '</tr>';
   }
   function wireNewSpQuoteEvents(){
     var clientSel = document.getElementById('mq-client');
     if(clientSel) clientSel.addEventListener('change', function(){ manualQuoteDraft.clientId = this.value; });
     var validEl = document.getElementById('mq-valid-until');
     if(validEl) validEl.addEventListener('change', function(){ manualQuoteDraft.validUntil = this.value; });
-    var jobEl = document.getElementById('mq-job-name');
-    if(jobEl) jobEl.addEventListener('input', function(){ manualQuoteDraft.jobName = this.value; });
-    var qtyEl = document.getElementById('mq-quantity');
-    var priceEl = document.getElementById('mq-price');
-    var updateTotal = function(){
-      manualQuoteDraft.quantity = Number(qtyEl.value)||0;
-      manualQuoteDraft.sellingPricePerUnit = Number(priceEl.value)||0;
-      var total = Math.max(1, Number(manualQuoteDraft.quantity)||1) * (Number(manualQuoteDraft.sellingPricePerUnit)||0);
-      var totalEl = document.getElementById('mq-total');
-      if(totalEl) totalEl.textContent = fmtMoney(total);
-    };
-    if(qtyEl) qtyEl.addEventListener('input', updateTotal);
-    if(priceEl) priceEl.addEventListener('input', updateTotal);
+
+    // Just `render()` on add/remove — same reasoning as the invoice/document editor: render()
+    // already re-wires this view (see the dispatcher below), so calling wireNewSpQuoteEvents()
+    // again here would double (then quadruple) every listener the longer a quote is edited.
+    document.getElementById('mq-items-body').addEventListener('input', function(e){
+      var tr = e.target.closest('tr'); if(!tr) return;
+      var idx = Number(tr.getAttribute('data-idx'));
+      if(e.target.classList.contains('mq-it-desc')) manualQuoteDraft.items[idx].description = e.target.value;
+      if(e.target.classList.contains('mq-it-qty')) manualQuoteDraft.items[idx].qty = Number(e.target.value)||0;
+      if(e.target.classList.contains('mq-it-price')) manualQuoteDraft.items[idx].unitPrice = Number(e.target.value)||0;
+      var lt = (Number(manualQuoteDraft.items[idx].qty)||0) * (Number(manualQuoteDraft.items[idx].unitPrice)||0);
+      tr.querySelector('[data-line-total]').textContent = fmtMoney(lt);
+      updateManualQuoteTotalsDisplay();
+    });
+    document.getElementById('mq-add-item-btn').addEventListener('click', function(){
+      manualQuoteDraft.items.push({description:'', qty:1, unitPrice:0});
+      render();
+    });
+    document.getElementById('mq-items-body').addEventListener('click', function(e){
+      var btn = e.target.closest('[data-mq-remove-item]'); if(!btn) return;
+      var idx = Number(btn.getAttribute('data-mq-remove-item'));
+      if(manualQuoteDraft.items.length>1){ manualQuoteDraft.items.splice(idx,1); render(); }
+    });
+
     var costEl = document.getElementById('mq-cost');
     if(costEl) costEl.addEventListener('input', function(){ manualQuoteDraft.cost = Number(this.value)||0; });
     var notesEl = document.getElementById('mq-notes');
@@ -3876,12 +3940,18 @@
 
     var saveBtn = document.getElementById('save-manual-quote-btn');
     if(saveBtn) saveBtn.addEventListener('click', function(){
-      if(!(manualQuoteDraft.jobName||'').trim()){
-        alertBanner('Give the quote a job name before saving.');
+      var hasContent = (manualQuoteDraft.items||[]).some(function(it){ return (it.description||'').trim() !== ''; });
+      if(!hasContent){
+        alertBanner('Add at least one line item before saving.');
         return;
       }
       saveManualSpQuote();
     });
+  }
+  function updateManualQuoteTotalsDisplay(){
+    var subtotal = (manualQuoteDraft.items||[]).reduce(function(sum, it){ return sum + (Number(it.qty)||0) * (Number(it.unitPrice)||0); }, 0);
+    var totalEl = document.getElementById('mq-total');
+    if(totalEl) totalEl.textContent = fmtMoney(subtotal);
   }
 
   /* ---------------- Work Sheet — check off completed units per order ---------------- */
@@ -4292,8 +4362,8 @@
         dateDueLabel: 'Valid until', dateDue: q.validUntil,
         business: business, logo: logo,
         partyLabel: 'Quoted to', party: q.clientSnapshot || {},
-        items: [{ description: q.jobName, qty: q.quantity, unitPrice: q.sellingPricePerUnit }],
-        totalsRows: [{ label:'Total', value: q.sellingPriceTotal, bold:true }],
+        items: (q.items && q.items.length) ? q.items : [{ description: q.jobName, qty: q.quantity, unitPrice: q.sellingPricePerUnit }],
+        totalsRows: [{ label:'Subtotal', value: q.sellingPriceTotal, bold:false }, { label:'Total', value: q.sellingPriceTotal, bold:true }],
         notes: q.notes,
         payment: (business.bankName || business.accountNumber) ? business : null,
         footerThanks: business.legalName
@@ -5444,7 +5514,11 @@
     if(editQuoteBtn){ var eq = spQuotes.find(function(x){return x.id===editQuoteBtn.getAttribute('data-edit-quote');}); if(eq) editQuoteInCalculator(eq); return; }
 
     var dupQuoteBtn = e.target.closest('[data-duplicate-quote]');
-    if(dupQuoteBtn){ var dq = spQuotes.find(function(x){return x.id===dupQuoteBtn.getAttribute('data-duplicate-quote');}); if(dq) duplicateQuoteInCalculator(dq); return; }
+    if(dupQuoteBtn){
+      var dq = spQuotes.find(function(x){return x.id===dupQuoteBtn.getAttribute('data-duplicate-quote');});
+      if(dq){ (dq.items && dq.items.length) ? duplicateManualQuote(dq) : duplicateQuoteInCalculator(dq); }
+      return;
+    }
 
     var askDelQuote = e.target.closest('[data-ask-delete-quote]');
     if(askDelQuote){ uiConfirm = 'spquote-' + askDelQuote.getAttribute('data-ask-delete-quote'); render(); return; }
