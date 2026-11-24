@@ -510,6 +510,11 @@
   // localStorage (falls back to null, i.e. always asks, if storage isn't available).
   var workspace = null;
   try{ workspace = localStorage.getItem('sp_invoicing_workspace') || null; }catch(e){ workspace = null; }
+  // The name shown as the brand/header on any Solid Prints quote or invoice — Charl's
+  // business details (address, email, banking) are still shared across both companies,
+  // but the name printed at the top of the sheet (and the "Thank you — X" footer) should
+  // read "Solid Prints", not "Charl Engelbrecht", on anything that belongs to Solid Prints.
+  var SP_BRAND_NAME = 'Solid Prints';
   var business = defaultBusiness();
   var clients = [];
   var docs = [];
@@ -3759,7 +3764,7 @@
     html += '<div class="sheet-head">';
     html += '<div>';
     if(spSettings.logoDataUrl) html += '<img class="sheet-logo" src="'+esc(spSettings.logoDataUrl)+'" alt="">';
-    html += '<div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
+    html += '<div class="sheet-brand">'+esc(SP_BRAND_NAME)+'</div>';
     if(business.address) html += '<div class="sheet-meta-line">'+esc(business.address).replace(/\n/g,'<br>')+'</div>';
     if(business.email) html += '<div class="sheet-meta-line">'+esc(business.email)+(business.phone?' · '+esc(business.phone):'')+'</div>';
     if(business.regNumber) html += '<div class="sheet-meta-line">Reg / VAT: '+esc(business.regNumber)+'</div>';
@@ -3796,7 +3801,7 @@
 
     if(q.notes) html += '<div class="sheet-notes">'+esc(q.notes)+'</div>';
 
-    html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
+    html += '<div class="sheet-foot">Thank you — ' + esc(SP_BRAND_NAME) + '</div>';
     html += '</div></div>';
 
     html += renderFilamentNeededCard(q.filamentLines, q.totalFilamentCostedG);
@@ -4182,7 +4187,7 @@
     }
     lx += 4.5;
     doc.setFont('helvetica','bold'); doc.setFontSize(15); setColor(PDF_INK);
-    doc.text(model.business.legalName || 'Charl Engelbrecht', leftX, lx);
+    doc.text(model.brandName || model.business.legalName || 'Charl Engelbrecht', leftX, lx);
     doc.setFont('helvetica','normal'); doc.setFontSize(9); setColor(PDF_SOFT);
     (model.business.address||'').split('\n').filter(Boolean).forEach(function(line){ lx += 4.2; doc.text(line, leftX, lx); });
     if(model.business.email){ lx += 4.2; doc.text(model.business.email + (model.business.phone?'  ·  '+model.business.phone:''), leftX, lx); }
@@ -4360,13 +4365,13 @@
         kind: 'QUOTE', number: q.quoteNumber || 'quote',
         dateIssuedLabel: 'Issued', dateIssued: q.quoteDate,
         dateDueLabel: 'Valid until', dateDue: q.validUntil,
-        business: business, logo: logo,
+        business: business, logo: logo, brandName: SP_BRAND_NAME,
         partyLabel: 'Quoted to', party: q.clientSnapshot || {},
         items: (q.items && q.items.length) ? q.items : [{ description: q.jobName, qty: q.quantity, unitPrice: q.sellingPricePerUnit }],
         totalsRows: [{ label:'Subtotal', value: q.sellingPriceTotal, bold:false }, { label:'Total', value: q.sellingPriceTotal, bold:true }],
         notes: q.notes,
         payment: (business.bankName || business.accountNumber) ? business : null,
-        footerThanks: business.legalName
+        footerThanks: SP_BRAND_NAME
       };
       var pdf = buildSheetPdf(model);
       pdf.save((q.quoteNumber || 'quote') + '.pdf');
@@ -4661,7 +4666,7 @@
     html += '<div class="sheet-head">';
     html += '<div>';
     if(isSpDoc && spSettings.logoDataUrl) html += '<img class="sheet-logo" src="'+esc(spSettings.logoDataUrl)+'" alt="">';
-    html += '<div class="sheet-brand">'+esc(business.legalName||'Charl Engelbrecht')+'</div>';
+    html += '<div class="sheet-brand">'+esc(isSpDoc ? SP_BRAND_NAME : (business.legalName||'Charl Engelbrecht'))+'</div>';
     if(business.address) html += '<div class="sheet-meta-line">'+esc(business.address).replace(/\n/g,'<br>')+'</div>';
     if(business.email) html += '<div class="sheet-meta-line">'+esc(business.email)+(business.phone?' · '+esc(business.phone):'')+'</div>';
     if(business.regNumber) html += '<div class="sheet-meta-line">Reg / VAT: '+esc(business.regNumber)+'</div>';
@@ -4694,7 +4699,8 @@
 
     if(d.notes) html += '<div class="sheet-notes">'+esc(d.notes)+'</div>';
 
-    html += '<div class="sheet-foot">Thank you' + (business.legalName ? ' — ' + esc(business.legalName) : '') + '</div>';
+    var docFooterName = isSpDoc ? SP_BRAND_NAME : business.legalName;
+    html += '<div class="sheet-foot">Thank you' + (docFooterName ? ' — ' + esc(docFooterName) : '') + '</div>';
     html += '</div></div>';
 
     html += renderFilamentNeededCard(d.filamentLines, d.totalFilamentCostedG);
@@ -4731,17 +4737,20 @@
       var totalsRows = [{ label:'Subtotal', value: t.subtotal, bold:false }];
       if(d.vatEnabled) totalsRows.push({ label:'VAT (15%)', value: t.vat, bold:false });
       totalsRows.push({ label:'Total', value: t.total, bold:true });
+      // Same rule as the on-screen view: a Solid Prints document is branded "Solid Prints",
+      // not "Charl Engelbrecht", even though the two share one address/banking/business record.
+      var brandName = isSpDoc ? SP_BRAND_NAME : (business.legalName || 'Charl Engelbrecht');
       var model = {
         kind: d.kind==='invoice' ? 'INVOICE' : 'QUOTE', number: d.number || 'document',
         dateIssuedLabel: 'Issued', dateIssued: d.dateIssued,
         dateDueLabel: d.kind==='invoice' ? 'Due' : 'Valid until', dateDue: d.dateDue,
-        business: business, logo: logo,
+        business: business, logo: logo, brandName: brandName,
         partyLabel: 'Billed to', party: d.clientSnapshot || {},
         items: d.items || [],
         totalsRows: totalsRows,
         notes: d.notes,
         payment: (business.bankName || business.accountNumber) ? business : null,
-        footerThanks: business.legalName
+        footerThanks: brandName
       };
       var pdf = buildSheetPdf(model);
       pdf.save((d.number || 'document') + '.pdf');
